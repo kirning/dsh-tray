@@ -1,0 +1,38 @@
+{
+  "FixedFileInfo": {
+    "FileVersion": {
+      "Major": 1,
+      "Minor": 3,
+      "Patch": 0,
+      "Build": 0
+    },
+    "ProductVersion": {
+      "Major": 1,
+      "Minor": 3,
+      "Patch": 0,
+      "Build": 0
+    },
+    "FileFlagsMask": "3f",
+    "FileFlags": "00",
+    "FileOS": "040004",
+    "FileType": "01",
+    "FileSubType": "00"
+  },
+  "StringFileInfo": {
+    "Comments": "dsh web 托盘管理器",
+    "CompanyName": "",
+    "FileDescription": "dsh 托盘",
+    "FileVersion": "1.3.0.0",
+    "InternalName": "dsh-tray",
+    "LegalCopyright": "",
+    "OriginalFilename": "dsh-tray.exe",
+    "ProductName": "dsh 托盘",
+    "ProductVersion": "1.3.0.0"
+  },
+  "VarFileInfo": {
+    "Translation": {
+      "LangID": "0804",
+      "CharsetID": "04B0"
+    }
+  }
+}

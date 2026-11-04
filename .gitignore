@@ -1,0 +1,10 @@
+# 编译产物
+/bin/
+*.exe
+*.exe~
+
+# 本地临时
+/temp/
+*.log
+*.out
+*.err
