@@ -5,6 +5,22 @@
 - 单文件 exe，不依赖 .NET / Node 运行时
 - 图标反映三种状态：未运行（灰）/ 启动中（橙，两帧动画）/ 已就绪（绿）
 - 启动完成的判定以 dsh 日志为准（出现 `dsh web: http...`）
+- 菜单最末「版本 x.y.z」可点击，检查并自动更新本程序
+
+## 菜单
+
+| 项 | 说明 |
+|---|---|
+| 启动 / 重启 / 关闭 | 控制 dsh web |
+| 打开web | 默认浏览器打开 `http://127.0.0.1:<port>`，仅"已就绪"可点 |
+| 查看日志 | 用默认文本程序打开 dsh web 日志 |
+| 检查dsh更新 | 查 npm 上有没有更高的 dsh 版本（只查不升） |
+| 开机自启 / 启动后自动打开web | 可勾选配置 |
+| 退出 | 只结束托盘程序，dsh 继续运行 |
+| 完全退出 | 先关 dsh 服务再退出 |
+| 版本 x.y.z | 点击检查本程序更新 |
+
+双击托盘图标：未运行则启动，已就绪则打开 Web UI。
 
 ## 目录结构
 
@@ -64,6 +80,36 @@ go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
 
 每次产出新包都要升版本。
 
+## 自动更新
+
+点击菜单最后的「版本 x.y.z」：
+
+1. 查 `https://api.github.com/repos/kirning/dsh-tray/releases/latest`
+2. 与本地版本比较，有新版则询问是否更新
+3. 下载（约 8~9 MB）→ 重命名自身 → 新文件就位 → 自动重启
+
+dsh 服务是独立进程，更新托盘不会中断它。旧文件留作 `dsh-tray.old.exe`，下次启动自动清理。
+
+两个实现要点：
+- **下载走 API 资产端点**（`/releases/assets/<id>`），不用 `browser_download_url` ——
+  后者在 `github.com` 域名下，部分网络（如国内直连）根本不通；前者会 302 到
+  `release-assets.githubusercontent.com`，可直连。
+- **不设 `http.Client.Timeout`** —— 它把整个响应体读取算进去，慢网络下必然断在几 MB。
+  改为只限制拨号/TLS/响应头，下载整体上限 15 分钟。
+
+> 若所在网络把 `api.github.com` 也墙了，可设置 `HTTPS_PROXY` 环境变量后重试。
+
+## 找不到 dsh 时
+
+程序按以下顺序查找 `dsh`：
+
+1. `%ProgramFiles%\nodejs`、`C:\Program Files\nodejs`
+2. `%APPDATA%\npm`（npm 按用户安装前缀）
+3. `PATH` 里的 `dsh` 启动器 → 解析 npm shim 里的 bin.js 路径反推
+4. `PATH` 里 `node` 的安装目录
+
+都找不到会弹窗提示把 dsh 加入 `Path`（含具体操作步骤）。
+
 ## 运行时文件
 
 | 内容 | 位置 |
@@ -82,6 +128,7 @@ go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
 | `--selftest` | 路径解析、当前 dsh 版本、npm 查更新、运行状态 |
 | `--uitest` | 真实创建托盘与菜单，走一遍三态切换与动画，3 秒后退出 |
 | `--starttest` | 在 3999 端口起临时实例，验证启动→就绪→停止，不碰 3080 |
+| `--checkupdate` | 查 GitHub release 并**真实下载一次** exe 核对字节数（验证更新链路） |
 
 ```powershell
 go test ./...    # 纯逻辑单测：日志标志、僵尸锁、失败提取、semver、双击判定
