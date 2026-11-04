@@ -10,10 +10,11 @@
 
 ```
 dsh-tray/
-├── cmd/dsh-tray/          入口（main.go）+ 生成的版本资源 versioninfo.syso
+├── cmd/dsh-tray/          入口（main.go）+ 生成的版本/图标资源 versioninfo.syso
 ├── internal/tray/         实现（托盘、状态机、进程控制、图标、配置）
 │   └── assets/            角色序列帧（go:embed 打包进 exe）
-├── resources/             app.manifest（Common Controls v6，walk 必需）
+├── tools/genicon/         由角色帧生成 resources/app.ico
+├── resources/             app.manifest、app.ico（exe 图标）
 ├── configs/               versioninfo.json（构建期版本信息）
 ├── bin/                   编译产物 dsh-tray.exe
 ├── build.ps1              一键构建
@@ -22,7 +23,15 @@ dsh-tray/
 ```
 
 `versioninfo.syso` 是 `go build` 自动纳入的资源文件，**必须和 main.go 同目录**，
-不能放进 `bin/`。
+不能放进 `bin/`。它把 **清单 + 版本信息 + 应用图标**打进同一个 `.rsrc` 段
+（Go 链接器只允许一个），因此已在仓库中提交；改动清单/版本/图标后由 `build.ps1` 重新生成。
+
+## 图标
+
+- **exe 图标**：取 `assets/running.png` 那一帧（张嘴抬手的角色），不带状态角标 ——
+  由 `tools/genicon` 合成多尺寸 `resources/app.ico`，再由 `goversioninfo -icon` 嵌入 exe。
+- **托盘图标**：运行时按状态合成，右下角带颜色圆点（绿=运行中 / 橙=启动中 / 灰=未运行），
+  启动中两帧交替形成动画。
 
 ## 构建
 
@@ -33,7 +42,10 @@ dsh-tray/
 ```
 
 脚本会自动同步两处版本号（`internal/tray/main.go` 与 `configs/versioninfo.json`）、
-重新生成资源、编译到 `bin/dsh-tray.exe`。
+生成 `resources/app.ico`、重新生成资源、编译到 `bin/dsh-tray.exe`。
+
+⚠️ **不要只用 `go build`**：跳过资源生成会得到一个**没有清单**的 exe，
+启动时 walk 直接崩在 `TTM_ADDTOOL failed`。务必用 `build.ps1`。
 
 依赖 `goversioninfo`（一次性安装）：
 ```powershell
