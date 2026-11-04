@@ -1,9 +1,11 @@
 package tray
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,9 +20,25 @@ const updateRepo = "kirning/dsh-tray"
 const releaseAPI = "https://api.github.com/repos/" + updateRepo + "/releases/latest"
 
 type releaseAsset struct {
+	ID   int64  `json:"id"`
 	Name string `json:"name"`
 	URL  string `json:"browser_download_url"`
 	Size int64  `json:"size"`
+}
+
+// downloadURL 返回实际下载地址。
+//
+// 注意：不要用 browser_download_url —— 它在 github.com 域名下，
+// 在部分网络（本机就是）根本连不通。改走 API 的资产端点：
+//
+//	https://api.github.com/repos/<repo>/releases/assets/<id>
+//
+// 它会 302 到 release-assets.githubusercontent.com（该域名可直连，无需代理）。
+func downloadURL(a releaseAsset) string {
+	if a.ID > 0 {
+		return fmt.Sprintf("https://api.github.com/repos/%s/releases/assets/%d", updateRepo, a.ID)
+	}
+	return a.URL
 }
 
 type releaseInfo struct {
@@ -29,14 +47,51 @@ type releaseInfo struct {
 	Assets []releaseAsset `json:"assets"`
 }
 
+// updateClient 只限制"连不上/连上不响应"的时长，**不设整体 Timeout**。
+// 原因：exe 有 8~9 MB，慢网络下读 body 很容易超过 60s，设整体超时会把下载掐断
+// （实测：59s 时断了，只收到 2.9MB）。整体上限由各调用处的 context 控制。
 func updateClient() *http.Client {
 	return &http.Client{
-		Timeout: 60 * time.Second,
 		Transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			ResponseHeaderTimeout: 20 * time.Second,
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   15 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			TLSHandshakeTimeout:   15 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
 		},
 	}
+}
+
+// 各项操作的总体时长上限
+const (
+	metaTimeout     = 30 * time.Second
+	downloadTimeout = 15 * time.Minute
+)
+
+func doWithTimeout(req *http.Request, d time.Duration) (*http.Response, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), d)
+	resp, err := updateClient().Do(req.WithContext(ctx))
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	// 包装 Body，关闭时一并 cancel，避免 context 泄漏
+	resp.Body = &cancelOnClose{ReadCloser: resp.Body, cancel: cancel}
+	return resp, nil
+}
+
+type cancelOnClose struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelOnClose) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
 }
 
 // latestRelease 查 GitHub 最新 release。
@@ -49,7 +104,7 @@ func latestRelease() (releaseInfo, error) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "dsh-tray/"+appVersion)
 
-	resp, err := updateClient().Do(req)
+	resp, err := doWithTimeout(req, metaTimeout)
 	if err != nil {
 		return rel, fmt.Errorf("访问 GitHub 失败：%v\r\n\r\n若本机访问 GitHub 受限，可设置环境变量 HTTPS_PROXY 后重试。", err)
 	}
@@ -121,9 +176,17 @@ func applyUpdate(a releaseAsset) error {
 	newPath := filepath.Join(dir, "dsh-tray.new.exe")
 	oldPath := filepath.Join(dir, "dsh-tray.old.exe")
 
-	resp, err := updateClient().Get(a.URL)
+	req, err := http.NewRequest(http.MethodGet, downloadURL(a), nil)
 	if err != nil {
-		return fmt.Errorf("下载失败：%v", err)
+		return err
+	}
+	// API 资产端点必须带这个 Accept 才会返回二进制流而不是 JSON
+	req.Header.Set("Accept", "application/octet-stream")
+	req.Header.Set("User-Agent", "dsh-tray/"+appVersion)
+
+	resp, err := doWithTimeout(req, downloadTimeout)
+	if err != nil {
+		return fmt.Errorf("下载失败：%v\r\n\r\n若本机访问 GitHub 受限，可设置环境变量 HTTPS_PROXY 后重试。", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -174,22 +237,64 @@ func cleanupOldBinary() {
 }
 
 // checkUpdateReport 是隐藏自检：查一次 GitHub 更新并把结果写到 updatecheck.txt。
-// 界面难以点击验证，所以把网络与解析链路单独暴露出来。
+// 会顺带把 release 里的 exe 真下载一遍（只统计字节数、随即删除），
+// 用来验证"部分网络下 github.com 不通但 API 资产端点可下"这条链路真的可用。
 func checkUpdateReport() {
 	out := &strings.Builder{}
 	fmt.Fprintf(out, "local   = %s\r\n", appVersion)
 	fmt.Fprintf(out, "api     = %s\r\n", releaseAPI)
 
-	tag, newer, asset, err := checkAppUpdate()
+	rel, err := latestRelease()
 	if err != nil {
 		fmt.Fprintf(out, "ERROR   = %v\r\n", err)
-	} else {
-		fmt.Fprintf(out, "remote  = %s\r\n", tag)
-		fmt.Fprintf(out, "newer   = %v\r\n", newer)
-		if newer {
-			fmt.Fprintf(out, "asset   = %s (%d bytes)\r\n", asset.Name, asset.Size)
+		_ = os.MkdirAll(dataDir(), 0o755)
+		_ = os.WriteFile(filepath.Join(dataDir(), "updatecheck.txt"), []byte(out.String()), 0o644)
+		return
+	}
+	remote := strings.TrimPrefix(rel.Tag, "v")
+	fmt.Fprintf(out, "remote  = %s\r\n", remote)
+
+	if r, ok1 := parseSemver(remote); ok1 {
+		if l, ok2 := parseSemver(appVersion); ok2 {
+			fmt.Fprintf(out, "newer   = %v\r\n", compareSemver(r, l) > 0)
 		}
 	}
+
+	asset, ok := findExeAsset(rel)
+	if !ok {
+		fmt.Fprintf(out, "asset   = (release 里没有 exe)\r\n")
+	} else {
+		fmt.Fprintf(out, "asset   = %s  size=%d\r\n", asset.Name, asset.Size)
+		fmt.Fprintf(out, "dl-url  = %s\r\n", downloadURL(asset))
+
+		tmp := filepath.Join(os.TempDir(), "dsh-tray-downloadtest.exe")
+		_ = os.Remove(tmp)
+		req, _ := http.NewRequest(http.MethodGet, downloadURL(asset), nil)
+		req.Header.Set("Accept", "application/octet-stream")
+		req.Header.Set("User-Agent", "dsh-tray/"+appVersion)
+		resp, derr := doWithTimeout(req, downloadTimeout)
+		if derr != nil {
+			fmt.Fprintf(out, "download= 失败: %v\r\n", derr)
+		} else {
+			defer resp.Body.Close()
+			f, ferr := os.Create(tmp)
+			var n int64
+			if ferr != nil {
+				fmt.Fprintf(out, "download= 无法写入临时文件: %v\r\n", ferr)
+			} else {
+				n, derr = io.Copy(f, resp.Body)
+				_ = f.Close()
+				_ = os.Remove(tmp)
+				if derr != nil {
+					fmt.Fprintf(out, "download= 中断: %v（已收 %d 字节）\r\n", derr, n)
+				} else {
+					match := asset.Size == 0 || n == asset.Size
+					fmt.Fprintf(out, "download= OK %d 字节，与 size 一致=%v\r\n", n, match)
+				}
+			}
+		}
+	}
+
 	_ = os.MkdirAll(dataDir(), 0o755)
 	_ = os.WriteFile(filepath.Join(dataDir(), "updatecheck.txt"), []byte(out.String()), 0o644)
 }

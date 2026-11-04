@@ -237,6 +237,20 @@ func TestBinJSFromShim(t *testing.T) {
 	})
 }
 
+// 更新下载必须走 API 资产端点（github.com 域名在受限网络下不通）。
+func TestDownloadURL(t *testing.T) {
+	got := downloadURL(releaseAsset{ID: 123, URL: "https://github.com/x/y/releases/download/v1/a.exe"})
+	want := "https://api.github.com/repos/" + updateRepo + "/releases/assets/123"
+	if got != want {
+		t.Fatalf("应优先用 API 资产端点\n got %s\nwant %s", got, want)
+	}
+	// 没有 id 时才回退到 browser_download_url
+	got2 := downloadURL(releaseAsset{URL: "https://example.com/a.exe"})
+	if got2 != "https://example.com/a.exe" {
+		t.Fatalf("没有 id 时应回退，实际 %s", got2)
+	}
+}
+
 func TestPortOverride(t *testing.T) {
 	d := NewDsh(filepath.Join(t.TempDir(), "log.txt"))
 	if d.Port() != dshPort {
