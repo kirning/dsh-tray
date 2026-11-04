@@ -2,11 +2,10 @@ package tray
 
 import (
 	"fmt"
-
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
-
 	"time"
 
 	"github.com/lxn/walk"
@@ -18,7 +17,7 @@ const pkgName = "@deepseek-ai/dsh"
 
 // appVersion 应用自身版本（与被管理的 dsh 版本无关）。
 // 用 var 而非 const，便于构建时用 -ldflags "-X main.appVersion=x.y.z" 覆盖。
-var appVersion = "1.3.0"
+var appVersion = "1.4.0"
 
 var (
 	dsh *Dsh
@@ -114,11 +113,18 @@ func Run(args []string) {
 			starttest()
 			return
 		}
+		if a == "--checkupdate" {
+			checkUpdateReport()
+			return
+		}
 	}
 
 	if !ensureSingleInstance() {
 		return
 	}
+
+	// 上次自更新可能留下 dsh-tray.old.exe，启动时顺手清掉
+	cleanupOldBinary()
 
 	dir := dataDir()
 	_ = os.MkdirAll(dir, 0o755)
@@ -213,7 +219,7 @@ func buildMenu(menu *walk.Menu) error {
 
 	menu.Actions().Add(walk.NewSeparatorAction())
 
-	actUpdate = newAction("检查更新", func() { doCheckUpdate() })
+	actUpdate = newAction("检查dsh更新", func() { doCheckUpdate() })
 	menu.Actions().Add(actUpdate)
 
 	actAuto = newAction("开机自启", func() { doToggleAutoStart() })
@@ -236,10 +242,9 @@ func buildMenu(menu *walk.Menu) error {
 	actExitAll = newAction("完全退出", func() { doExitAll() })
 	menu.Actions().Add(actExitAll)
 
-	// 最后一项：版本号，纯展示，不可点击
+	// 最后一项：版本号，点击检查本程序更新（从 GitHub Release 拉取）
 	menu.Actions().Add(walk.NewSeparatorAction())
-	actVersion = newAction("版本 "+appVersion, nil)
-	actVersion.SetEnabled(false)
+	actVersion = newAction("版本 "+appVersion+"（点击检查更新）", func() { doCheckAppUpdate() })
 	menu.Actions().Add(actVersion)
 
 	return nil
@@ -474,6 +479,95 @@ func doCheckUpdate() {
 			walk.MsgBox(mw, "检查更新", msg, walk.MsgBoxIconInformation)
 		})
 	}()
+}
+
+// msgBox 在 UI 线程弹提示（不等待用户操作）。
+func msgBox(title, text string, style walk.MsgBoxStyle) {
+	syncUI(func() {
+		walk.MsgBox(mw, title, text, style)
+	})
+}
+
+// askYesNo 在 UI 线程弹确认框并等待结果。
+// 注意：walk 的 Synchronize 用 PostMessage 异步投递（不会阻塞等待），
+// 所以必须靠 channel 把结果回传给后台 goroutine。
+func askYesNo(title, text string) bool {
+	ch := make(chan bool, 1)
+	syncUI(func() {
+		r := walk.MsgBox(mw, title, text, walk.MsgBoxYesNo|walk.MsgBoxIconQuestion)
+		ch <- r == walk.DlgCmdYes
+	})
+	return <-ch
+}
+
+// doCheckAppUpdate 检查本程序自身更新：查 GitHub Release → 下载 → 替换 → 重启。
+// dsh 服务是独立进程，更新托盘程序不会打断它。
+func doCheckAppUpdate() {
+	if actVersion != nil {
+		actVersion.SetEnabled(false)
+	}
+	go func() {
+		defer syncUI(func() {
+			if actVersion != nil {
+				actVersion.SetEnabled(true)
+			}
+		})
+
+		tag, newer, asset, err := checkAppUpdate()
+		if err != nil {
+			msgBox(appName+" - 检查更新", "检查更新失败：\r\n\r\n"+err.Error(), walk.MsgBoxIconError)
+			return
+		}
+		if !newer {
+			msgBox(appName+" - 检查更新",
+				fmt.Sprintf("当前版本：%s\r\n最新版本：%s\r\n\r\n已是最新版本。", appVersion, tag),
+				walk.MsgBoxIconInformation)
+			return
+		}
+
+		if !askYesNo(appName+" - 发现新版本",
+			fmt.Sprintf("当前版本：%s\r\n最新版本：%s\r\n\r\n是否立即下载并更新？\r\n\r\n更新过程：下载 → 替换本程序 → 自动重启。\r\ndsh 服务不会中断。",
+				appVersion, tag)) {
+			return
+		}
+
+		if err := applyUpdate(asset); err != nil {
+			msgBox(appName+" - 更新失败", err.Error(), walk.MsgBoxIconError)
+			return
+		}
+
+		msgBox(appName+" - 更新完成",
+			fmt.Sprintf("已更新到 %s。\r\n\r\n点击「确定」后自动重启本程序。\r\ndsh 服务会继续运行。", tag),
+			walk.MsgBoxIconInformation)
+
+		syncUI(func() {
+			restartSelf()
+			if ni != nil {
+				_ = ni.SetVisible(false)
+				ni.Dispose()
+			}
+			os.Exit(0)
+		})
+	}()
+}
+
+// restartSelf 启动更新后的新进程。
+// 必须先释放单实例互斥体，否则新进程启动时会判定"已有实例"而立即退出。
+func restartSelf() {
+	exe, err := os.Executable()
+	if err != nil {
+		return
+	}
+	if exe, err = filepath.Abs(exe); err != nil {
+		return
+	}
+	if singleMutex != 0 {
+		_ = windows.CloseHandle(singleMutex)
+		singleMutex = 0
+	}
+	cmd := exec.Command(exe)
+	cmd.Dir = filepath.Dir(exe)
+	_ = cmd.Start()
 }
 
 // reportStartFailure 把"启动中→未运行"的失败原因从日志里捞出来提示用户。

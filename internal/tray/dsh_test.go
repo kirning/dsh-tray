@@ -189,6 +189,54 @@ func TestDoubleClickWindowSane(t *testing.T) {
 	}
 }
 
+// 从 npm 的 dsh.cmd 里反推 bin.js 路径（PATH 兜底定位的关键）。
+func TestBinJSFromShim(t *testing.T) {
+	t.Run("dp0 相对形式", func(t *testing.T) {
+		dir := t.TempDir()
+		bj := filepath.Join(dir, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js")
+		if err := os.MkdirAll(filepath.Dir(bj), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		os.WriteFile(bj, []byte("// stub"), 0o644)
+
+		shim := filepath.Join(dir, "dsh.cmd")
+		os.WriteFile(shim, []byte("@ECHO off\r\n\"%dp0%\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js\" %*\r\n"), 0o644)
+
+		got := binJSFromShim(shim)
+		if got == "" {
+			t.Fatal("应从 shim 解析出 bin.js 路径")
+		}
+		if filepath.Clean(got) != filepath.Clean(bj) {
+			t.Fatalf("解析结果不对:\n got %s\nwant %s", got, bj)
+		}
+	})
+
+	t.Run("绝对路径形式", func(t *testing.T) {
+		dir := t.TempDir()
+		bj := filepath.Join(dir, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js")
+		os.MkdirAll(filepath.Dir(bj), 0o755)
+		os.WriteFile(bj, []byte("// stub"), 0o644)
+
+		shim := filepath.Join(dir, "dsh.cmd")
+		// 用正斜杠的绝对路径（Git Bash 生成的 shim 常见形态）
+		content := "\"" + filepath.ToSlash(filepath.Join(dir, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js")) + "\" %*"
+		os.WriteFile(shim, []byte(content), 0o644)
+
+		if got := binJSFromShim(shim); got == "" {
+			t.Fatal("绝对路径形式也应能解析")
+		}
+	})
+
+	t.Run("bin.js 不存在则返回空", func(t *testing.T) {
+		dir := t.TempDir()
+		shim := filepath.Join(dir, "dsh.cmd")
+		os.WriteFile(shim, []byte("\"%dp0%\\node_modules\\@deepseek-ai\\dsh\\lib\\bin.js\" %*\r\n"), 0o644)
+		if got := binJSFromShim(shim); got != "" {
+			t.Fatalf("bin.js 不存在时应返回空，实际 %q", got)
+		}
+	})
+}
+
 func TestPortOverride(t *testing.T) {
 	d := NewDsh(filepath.Join(t.TempDir(), "log.txt"))
 	if d.Port() != dshPort {

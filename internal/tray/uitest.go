@@ -72,7 +72,7 @@ func uitest() {
 		return
 	}
 	res.WriteString(fmt.Sprintf("buildMenu OK, actions=%d\r\n", ni.ContextMenu().Actions().Len()))
-	res.WriteString(fmt.Sprintf("版本菜单项 = %q，可用=%v（应为 false）\r\n",
+	res.WriteString(fmt.Sprintf("版本菜单项 = %q，可用=%v（应为 true，点击检查本程序更新）\r\n",
 		actVersion.Text(), actVersion.Enabled()))
 	res.WriteString(fmt.Sprintf("配置项「%s」勾选=%v\r\n", actAutoOpen.Text(), actAutoOpen.Checked()))
 	res.WriteString(fmt.Sprintf("退出项 = %q（只退托盘）；%q（连 dsh 一起关）\r\n",

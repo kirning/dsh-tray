@@ -71,6 +71,12 @@ func candidateRoots() []string {
 	}
 	add(filepath.Join(os.Getenv("ProgramFiles"), "nodejs"))
 	add(`C:\Program Files\nodejs`)
+	// npm 的按用户安装前缀：dsh 装在 %APPDATA%\npm\node_modules 下
+	add(filepath.Join(os.Getenv("APPDATA"), "npm"))
+	// node 本身在 PATH 里时，它的安装目录也可能就是全局包根
+	if ne, ok := findOnPath("node"); ok {
+		add(filepath.Dir(ne))
+	}
 	if appdata := os.Getenv("APPDATA"); appdata != "" {
 		if m, _ := filepath.Glob(filepath.Join(appdata, "nvm", "v*")); len(m) > 0 {
 			// 版本目录名按字符串倒序，尽量取新的
@@ -82,21 +88,132 @@ func candidateRoots() []string {
 	return roots
 }
 
+// probeRoot 检查某个根目录下是否同时有 node.exe 和 dsh 的 bin.js。
+func probeRoot(root string) (string, string, bool) {
+	ne := filepath.Join(root, "node.exe")
+	bj := filepath.Join(root, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js")
+	if fileExists(ne) && fileExists(bj) {
+		return ne, bj, true
+	}
+	return "", "", false
+}
+
+// findOnPath 在 PATH 里按 Windows 的可执行扩展名顺序找命令。
+func findOnPath(name string) (string, bool) {
+	seen := map[string]bool{}
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		dir = strings.Trim(strings.TrimSpace(dir), `"`)
+		if dir == "" || seen[strings.ToLower(dir)] {
+			continue
+		}
+		seen[strings.ToLower(dir)] = true
+		for _, ext := range []string{".exe", ".cmd", ".bat", ""} {
+			p := filepath.Join(dir, name+ext)
+			if fileExists(p) {
+				return p, true
+			}
+		}
+	}
+	return "", false
+}
+
+// binJSFromShim 从 npm 生成的 dsh.cmd 里抠出 bin.js 的绝对路径。
+// shim 里通常长这样：  "%dp0%\node_modules\@deepseek-ai\dsh\lib\bin.js"
+func binJSFromShim(shimPath string) string {
+	raw, err := os.ReadFile(shimPath)
+	if err != nil {
+		return ""
+	}
+	s := strings.ReplaceAll(string(raw), `\`, "/")
+	const rel = "node_modules/@deepseek-ai/dsh/lib/bin.js"
+	idx := strings.Index(s, rel)
+	if idx < 0 {
+		return ""
+	}
+	prefix := s[:idx]
+	if j := strings.LastIndexAny(prefix, "\"' \t\r\n="); j >= 0 {
+		prefix = prefix[j+1:]
+	}
+	prefix = strings.TrimSuffix(prefix, "/")
+	if prefix == "" {
+		return ""
+	}
+	var p string
+	if strings.Contains(strings.ToLower(prefix), "%dp0%") {
+		// 相对 shim 所在目录
+		p = filepath.Join(filepath.Dir(shimPath), filepath.FromSlash(rel))
+	} else {
+		p = filepath.FromSlash(prefix + "/" + rel)
+	}
+	if fileExists(p) {
+		return p
+	}
+	return ""
+}
+
+// errDshNotFound 是找不到 dsh 时给用户的指引（用户明确要求提示加到环境变量）。
+func errDshNotFound() error {
+	return fmt.Errorf(`找不到 dsh，无法启动。
+
+本程序按以下顺序查找，都没找到：
+  1. 常见安装目录：%s、%s、%%APPDATA%%\npm、nvm 各版本目录
+  2. 系统环境变量 Path 里的 dsh 命令
+
+请这样处理：
+  · 打开命令提示符，执行：dsh --version
+  · 如果能输出版本号 → 说明 dsh 已可用但本程序没识别到。
+    请执行：where dsh
+    把输出结果告诉我，或直接重装本程序的最新版本。
+  · 如果提示「不是内部或外部命令」→ 说明 dsh 没加进 Path：
+    把 npm 全局目录（一般是 %%APPDATA%%\npm，或 node 的安装目录）
+    加入「系统属性 → 环境变量 → Path」，保存后重启本程序。`,
+		filepath.Join(os.Getenv("ProgramFiles"), "nodejs"), `C:\Program Files\nodejs`)
+}
+
 // ResolveDsh 定位 node.exe 与 dsh 的 bin.js。
 // 直接用 node 启动 bin.js，避免经过 cmd.exe 的批处理壳，窗口更干净。
+//
+// 查找顺序：常见安装根目录 → PATH 里的 dsh 启动器反推 → node 所在目录。
+// 这样即使用户把 npm 前缀装到了非常规位置，只要 dsh 在 PATH 里就能用。
 func ResolveDsh() (nodeExe, binJS string, err error) {
+	// 1) 常见安装根目录
 	for _, root := range candidateRoots() {
-		ne := filepath.Join(root, "node.exe")
-		bj := filepath.Join(root, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js")
-		if fileExists(ne) && fileExists(bj) {
+		if ne, bj, ok := probeRoot(root); ok {
 			return ne, bj, nil
 		}
 	}
-	return "", "", fmt.Errorf("找不到 dsh 安装（node.exe + @deepseek-ai/dsh/lib/bin.js）")
+
+	// 2) PATH 里的 dsh：先看同目录能不能凑齐 node+bin.js，再从 shim 内容抠路径
+	if shim, ok := findOnPath("dsh"); ok {
+		if ne, bj, ok := probeRoot(filepath.Dir(shim)); ok {
+			return ne, bj, nil
+		}
+		if bj := binJSFromShim(shim); bj != "" {
+			if ne, ok := findOnPath("node"); ok {
+				return ne, bj, nil
+			}
+			// node 不在 PATH，但 bin.js 的同级目录里通常有 node
+			if ne := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(bj)))), "node.exe"); fileExists(ne) {
+				return ne, bj, nil
+			}
+		}
+	}
+
+	// 3) node 在 PATH：用它的安装目录当全局包根
+	if ne, ok := findOnPath("node"); ok {
+		if _, bj, ok2 := probeRoot(filepath.Dir(ne)); ok2 {
+			return ne, bj, nil
+		}
+	}
+
+	return "", "", errDshNotFound()
 }
 
 // DshDir 返回已安装 dsh 包的目录。
 func DshDir() string {
+	if _, binJS, err := ResolveDsh(); err == nil {
+		return filepath.Dir(filepath.Dir(binJS)) // bin.js → lib → dsh
+	}
 	for _, root := range candidateRoots() {
 		dir := filepath.Join(root, "node_modules", "@deepseek-ai", "dsh")
 		if fileExists(filepath.Join(dir, "package.json")) {

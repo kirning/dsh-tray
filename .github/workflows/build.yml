@@ -1,0 +1,61 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 资源生成器：把 app.manifest + 版本信息 + 应用图标打进一个 .rsrc 段
+      - name: Install goversioninfo
+        run: go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        shell: pwsh
+        run: |
+          .\build.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Show version info
+        shell: pwsh
+        run: |
+          $vi = (Get-Item bin\dsh-tray.exe).VersionInfo
+          Write-Host ("FileVersion    = " + $vi.FileVersion)
+          Write-Host ("ProductVersion = " + $vi.ProductVersion)
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-tray-windows-amd64
+          path: bin/dsh-tray.exe
+          if-no-files-found: error
+
+      # 推 v* 标签时自动发布 Release（应用内自动更新就是读这个 latest release）
+      - name: Create Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bin/dsh-tray.exe
+          generate_release_notes: true
+          fail_on_unmatched_files: true

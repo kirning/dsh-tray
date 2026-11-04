@@ -78,9 +78,17 @@ if ($Version -ne '') {
 if ($LASTEXITCODE -ne 0) { throw 'genicon failed' }
 
 # regenerate resource: manifest + version info + app icon in ONE .rsrc section
-$gvi = Join-Path $env:GOPATH 'bin\goversioninfo.exe'
+$goPath = (& go env GOPATH)
+if ($LASTEXITCODE -ne 0 -or $goPath -eq '') { throw 'go env GOPATH failed' }
+$gvi = Join-Path $goPath 'bin\goversioninfo.exe'
 if (-not (Test-Path $gvi)) {
-    $gvi = Join-Path (Split-Path (Split-Path (& go env GOPATH))) 'go\bin\goversioninfo.exe'
+    $cmd = Get-Command goversioninfo.exe -ErrorAction SilentlyContinue
+    if ($cmd) { $gvi = $cmd.Source }
+}
+if (-not (Test-Path $gvi)) {
+    # PATH 里可能已经有（CI 里 go install 后 $GOPATH/bin 已加入 PATH）
+    $cmd = Get-Command goversioninfo -ErrorAction SilentlyContinue
+    if ($cmd) { $gvi = $cmd.Source }
 }
 if (-not (Test-Path $gvi)) {
     throw 'goversioninfo not found, run: go install github.com/josephspurrier/goversioninfo/cmd/goversioninfo@latest'
