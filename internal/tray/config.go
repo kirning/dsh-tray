@@ -26,6 +26,11 @@ type Config struct {
 	// 匿名访问 api.github.com 只有 60 次/小时、按出口 IP 算，公司/代理出口常被用光；
 	// 带上令牌是 5000 次/小时，基本不会再撞限流。留空则依次尝试环境变量与 gh CLI。
 	GithubToken string `json:"githubToken,omitempty"`
+
+	// DshPath 是用户手工指定的 dsh 启动器路径（可粘贴，也可点「浏览」选）。
+	// 空串表示自动探测。用 mise / volta / scoop 等版本管理器的机器上，
+	// 托盘从注册表 Run 键冷启动时 PATH 里没有 shims 目录，手填一次最省事。
+	DshPath string `json:"dshPath,omitempty"`
 }
 
 func defaultConfig() Config {
@@ -113,6 +118,18 @@ func gitHubTokenFromConfig() string {
 // setGitHubToken 保存/清空手填的令牌。
 func setGitHubToken(token string) error {
 	return updateConfig(func(c *Config) { c.GithubToken = token })
+}
+
+// dshPathFromConfig 返回手填的 dsh 路径（空串表示自动探测）。
+func dshPathFromConfig() string {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	return cfg.DshPath
+}
+
+// setDshPath 保存/清空手填的 dsh 路径。
+func setDshPath(p string) error {
+	return updateConfig(func(c *Config) { c.DshPath = p })
 }
 
 // syncAutoStartMirror 把注册表里真实的开机自启状态同步一份到 config.json。

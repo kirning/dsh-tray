@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -119,41 +120,98 @@ func sign(n int) int {
 
 // CurrentVersion 读取本地已安装的 dsh 版本。
 func CurrentVersion() (string, error) {
+	// 用户手填了路径就只认它：否则会读到另一个安装的 package.json，
+	// 菜单上的版本号和实际启动的不是一回事（实测踩过）。
+	if strings.TrimSpace(dshPathFromConfig()) != "" || strings.TrimSpace(os.Getenv("DSH_TRAY_DSH")) != "" {
+		return versionFromLauncher()
+	}
 	dir := DshDir()
 	if dir == "" {
-		return "", fmt.Errorf("找不到已安装的 @deepseek-ai/dsh")
+		// mise / volta 这类版本管理器下拿不到包目录，改问 dsh 自己
+		return versionFromLauncher()
 	}
 	raw, err := os.ReadFile(filepath.Join(dir, "package.json"))
 	if err != nil {
-		return "", err
+		return versionFromLauncher()
 	}
 	var pkg struct {
 		Version string `json:"version"`
 	}
 	if err := json.Unmarshal(raw, &pkg); err != nil {
-		return "", err
+		return versionFromLauncher()
 	}
 	if pkg.Version == "" {
-		return "", fmt.Errorf("package.json 里没有 version 字段")
+		return versionFromLauncher()
 	}
 	return pkg.Version, nil
 }
 
+// versionFromLauncher 执行 `dsh --version` 从输出里抠版本号。
+// 用于拿不到 package.json 的安装方式（mise 的 shim 等）。
+func versionFromLauncher() (string, error) {
+	l, err := resolveDshInstall()
+	if err != nil {
+		return "", fmt.Errorf("找不到已安装的 @deepseek-ai/dsh")
+	}
+	out, err := runHiddenTimeout(25*time.Second, l.exe, l.argv("--version")...)
+	if v := firstSemver(out); v != "" {
+		return v, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("执行 dsh --version 失败：%v", err)
+	}
+	return "", fmt.Errorf("dsh --version 没有输出可识别的版本号")
+}
+
+var semverRe = regexp.MustCompile(`\d+\.\d+\.\d+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?`)
+
+// firstSemver 返回文本里第一个像版本号的片段。
+func firstSemver(s string) string {
+	return semverRe.FindString(stripANSI(s))
+}
+
+// resolveNpmLaunch 定位怎么跑 npm：优先 node + npm-cli.js，退化为 npm 启动器。
+func resolveNpmLaunch() (launch, error) {
+	tryNode := func(ne string) (launch, bool) {
+		npmCli := filepath.Join(filepath.Dir(ne), "node_modules", "npm", "bin", "npm-cli.js")
+		if fileExists(npmCli) {
+			return launch{exe: ne, prefix: []string{npmCli}, how: "node " + npmCli}, true
+		}
+		return launch{}, false
+	}
+	if ne, ok := findOnPath("node"); ok {
+		if l, ok2 := tryNode(ne); ok2 {
+			return l, nil
+		}
+	}
+	for _, root := range candidateRoots() {
+		ne := filepath.Join(root, "node.exe")
+		if ne == "" || !fileExists(ne) {
+			continue
+		}
+		if l, ok2 := tryNode(ne); ok2 {
+			return l, nil
+		}
+	}
+	if shim, ok := findLauncher("npm"); ok {
+		if l, ok2 := launchFromLauncher(shim); ok2 {
+			return l, nil
+		}
+	}
+	return launch{}, fmt.Errorf("找不到 npm（既没有 npm-cli.js，也没有 npm 启动器）；可用「设置 → dsh 程序路径」指定")
+}
+
 // npmViewVersions 执行 npm view <pkg> versions --json。
-// 用 node 直接跑 npm-cli.js，避免经 cmd.exe 起批处理壳。
+// 用 node 直接跑 npm-cli.js，避免经 cmd.exe 起批处理壳；拿不到时退回 npm 启动器。
 func npmViewVersions(pkg string) (string, error) {
-	nodeExe, _, err := ResolveDsh()
+	l, err := resolveNpmLaunch()
 	if err != nil {
 		return "", err
-	}
-	npmCli := filepath.Join(filepath.Dir(nodeExe), "node_modules", "npm", "bin", "npm-cli.js")
-	if !fileExists(npmCli) {
-		return "", fmt.Errorf("找不到 npm-cli.js: %s", npmCli)
 	}
 	// 「设置」里配了代理时，把代理环境变量传给 npm（npm 自己不走 Go 的 http.Client）
 	addr, scheme := proxyConfig()
 	return runHiddenTimeoutEnv(40*time.Second, proxyEnv(addr, scheme),
-		nodeExe, npmCli, "view", pkg, "versions", "--json")
+		l.exe, l.argv("view", pkg, "versions", "--json")...)
 }
 
 // CheckUpdates 返回当前版本，以及所有高于当前版本的可用版本（已升序去重）。

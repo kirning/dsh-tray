@@ -18,7 +18,7 @@
 | 查看日志 | 用默认文本程序打开 dsh web 日志 |
 | 检查dsh更新 | 查 npm 上有没有更高的 dsh 版本（只查不升） |
 | 开机自启 / 启动后自动打开web | 可勾选配置（与「设置」窗口双向同步） |
-| 设置… | 代理配置、启动配置同步、版本+检查更新、只读日志查看 |
+| 设置… | dsh 路径、代理配置、启动配置同步、版本+检查更新、只读日志查看 |
 | 退出 | 只结束托盘程序，dsh 继续运行 |
 | 完全退出 | 先关 dsh 服务再退出 |
 | 版本 x.y.z | 点击检查本程序更新 |
@@ -31,6 +31,7 @@
 
 | 分区 | 内容 |
 |---|---|
+| dsh 程序路径 | 默认自动探测。用 mise / volta / scoop 等版本管理器时，托盘冷启动的 PATH 里没有 shims 目录，可在这里**粘贴路径**（支持 `%LOCALAPPDATA%` 这类变量、带引号、只给目录）或点「浏览…」选 `dsh.exe`；「保存」后会立刻跑一次 `dsh --version` 验证，「自动探测」则清空回到自动查找 |
 | 代理服务器 | 填 `IP:端口`（或 `IP 端口`、中文冒号、`socks5://` / `http://` 前缀）。点「检测并保存」后**优先做 SOCKS5 握手**，不通则自动回退 HTTP；留空或点「清空」= 直连 |
 | 启动配置 | 「开机自启」「启动后自动打开web」两份勾选，与右键菜单实时同步；`config.json` 里另存一份 `autoStart` 副本 |
 | 版本与更新 | 显示当前版本，旁边「检查更新」按钮；检查→下载→替换→重启的进度走进度条，错误直接显示在状态框（只读、可复制）。下面一行是**可选的 GitHub Token**（见下） |
@@ -153,19 +154,25 @@ dsh 服务是独立进程，更新托盘不会中断它。旧文件留作 `dsh-t
 
 程序按以下顺序查找 `dsh`：
 
-1. `%ProgramFiles%\nodejs`、`C:\Program Files\nodejs`
-2. `%APPDATA%\npm`（npm 按用户安装前缀）
-3. `PATH` 里的 `dsh` 启动器 → 解析 npm shim 里的 bin.js 路径反推
-4. `PATH` 里 `node` 的安装目录
+1. 「设置 → dsh 程序路径」里手填的路径（`config.json` 的 `dshPath`）
+2. 环境变量 `DSH_TRAY_DSH`（不改配置临时指定）
+3. 常见 node 根目录：`%ProgramFiles%\nodejs`、`%APPDATA%\npm`、nvm / fnm / mise / volta 的 node 目录
+4. 命令行 `PATH` 里的 `dsh`
+5. 版本管理器的 shim 目录：`%LOCALAPPDATA%\mise\shims`、`%USERPROFILE%\.local\share\mise\shims`、
+   `%LOCALAPPDATA%\Volta\bin`、`%LOCALAPPDATA%\pnpm`、`scoop\shims`、`chocolatey\bin`
 
-都找不到会弹窗提示把 dsh 加入 `Path`（含具体操作步骤）。
+找到启动器后分两种启动方式：能同时拿到 `node.exe + bin.js` 就直接用 node 跑 bin.js；
+拿不到（mise / volta 的 shim 就是这种）就**直接执行启动器**，让版本管理器自己解析 node。
+
+都找不到会弹窗给出具体操作步骤。**最快的解决办法**：终端里执行 `where dsh`，
+把输出的路径粘贴到「设置 → dsh 程序路径」，点「保存」即可（会立即验证一次）。
 
 ## 运行时文件
 
 | 内容 | 位置 |
 |---|---|
 | dsh web 日志（含本程序日志） | `%LOCALAPPDATA%\dsh-tray\dsh-web.txt` |
-| 配置 | `%LOCALAPPDATA%\dsh-tray\config.json`：`autoOpenWeb` / `proxy` / `proxyScheme` / `autoStart`（副本） |
+| 配置 | `%LOCALAPPDATA%\dsh-tray\config.json`：`autoOpenWeb` / `proxy` / `proxyScheme` / `autoStart`（副本）/ `githubToken` / `dshPath` |
 | 生成的图标 / 自检报告 | `%LOCALAPPDATA%\dsh-tray\` |
 | 开机自启（权威） | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `DshTray` |
 
@@ -175,7 +182,7 @@ dsh 服务是独立进程，更新托盘不会中断它。旧文件留作 `dsh-t
 
 | 参数 | 作用 |
 |---|---|
-| `--selftest` | 路径解析、当前 dsh 版本、npm 查更新、运行状态 |
+| `--selftest` | dsh 定位（含实际启动方式）、当前 dsh 版本、npm 查更新、运行状态 |
 | `--uitest` | 真实创建托盘与菜单，走一遍三态切换与动画，3 秒后退出 |
 | `--settingstest` | 真实创建「设置」窗口，核对控件、配置联动、进度与状态刷新，3 秒后退出 |
 | `--shot` | 设置窗口两个尺寸的截图 + 每个控件的实际矩形（核对分区对齐），并验证关闭后宿主窗口没被显出来 |

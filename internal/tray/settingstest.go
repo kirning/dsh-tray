@@ -51,6 +51,8 @@ func settingstest() {
 		return
 	}
 	res.WriteString("openSettings OK\r\n")
+	res.WriteString(fmt.Sprintf("  dsh 路径输入框 = %q（配置 = %q）\r\n", s.dshEdit.Text(), dshPathFromConfig()))
+	res.WriteString(fmt.Sprintf("  dsh 解析结果 = %q\r\n", s.dshStatus.Text()))
 	res.WriteString(fmt.Sprintf("  代理输入框 = %q\r\n", s.proxyEdit.Text()))
 	res.WriteString(fmt.Sprintf("  版本标签 = %q\r\n", s.versionLabel.Text()))
 	res.WriteString(fmt.Sprintf("  开机自启勾选 = %v（注册表 = %v）\r\n", s.chkAuto.Checked(), autoStartEnabled()))

@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -15,6 +18,9 @@ import (
 // settingsForm 保存「设置」窗口里需要后续读写的控件。
 type settingsForm struct {
 	dlg *walk.Dialog
+
+	dshEdit   *walk.LineEdit
+	dshStatus *walk.LineEdit
 
 	proxyEdit   *walk.LineEdit
 	proxyStatus *walk.Label
@@ -68,10 +74,53 @@ func openSettings(owner walk.Form) error {
 	err := (decl.Dialog{
 		AssignTo: &dlg,
 		Title:    "设置 - " + appName,
-		Size:     decl.Size{Width: 780, Height: 780},
-		MinSize:  decl.Size{Width: 720, Height: 660},
+		Size:     decl.Size{Width: 780, Height: 860},
+		MinSize:  decl.Size{Width: 720, Height: 700},
 		Layout:   decl.VBox{Margins: decl.Margins{Left: 14, Top: 12, Right: 14, Bottom: 12}, Spacing: 10},
 		Children: []decl.Widget{
+			// dsh 路径放在最前面：它是所有功能的前提。用 mise / volta 之类
+			// 版本管理器时不手填一次就可能"找不到 dsh"（shims 目录不在 PATH 里）。
+			decl.GroupBox{
+				Title:  "dsh 程序路径",
+				Layout: decl.VBox{Spacing: 6},
+				Children: []decl.Widget{
+					decl.Composite{
+						Layout: decl.HBox{Spacing: 6},
+						Children: []decl.Widget{
+							decl.LineEdit{
+								AssignTo:  &s.dshEdit,
+								Text:      dshPathFromConfig(),
+								MinSize:   decl.Size{Height: 22},
+								CueBanner: `留空 = 自动探测。可直接粘贴路径，如 %LOCALAPPDATA%\mise\shims\dsh.exe`,
+							},
+							decl.PushButton{
+								Text:      "浏览…",
+								MaxSize:   decl.Size{Width: 80},
+								OnClicked: func() { browseDshPath() },
+							},
+							decl.PushButton{
+								Text:      "保存",
+								MaxSize:   decl.Size{Width: 70},
+								OnClicked: func() { saveDshPathFromSettings() },
+							},
+							decl.PushButton{
+								Text:      "自动探测",
+								MaxSize:   decl.Size{Width: 80},
+								OnClicked: func() { clearDshPathFromSettings() },
+							},
+						},
+					},
+					// 只读输入框而不是 Label：路径太长时 Label 会被省略号截断，
+					// 而这里可以横向滚动、也能选中复制给别的机器用。
+					decl.LineEdit{
+						AssignTo: &s.dshStatus,
+						ReadOnly: true,
+						Text:     describeDsh(),
+						MinSize:  decl.Size{Height: 22},
+					},
+				},
+			},
+
 			decl.GroupBox{
 				Title:  "代理服务器",
 				Layout: decl.VBox{Spacing: 6},
@@ -89,9 +138,9 @@ func openSettings(owner walk.Form) error {
 								MinSize:  decl.Size{Width: 220, Height: 22},
 							},
 							decl.PushButton{
-								AssignTo:  &s.btnProxy,
-								Text:      "检测并保存",
-								MaxSize:   decl.Size{Width: 100},
+								AssignTo: &s.btnProxy,
+								Text:     "检测并保存",
+								MaxSize:  decl.Size{Width: 100},
 								OnClicked: func() {
 									saveProxyFromSettings()
 								},
@@ -149,9 +198,9 @@ func openSettings(owner walk.Form) error {
 						Children: []decl.Widget{
 							decl.Label{AssignTo: &s.versionLabel, Text: "当前版本：" + appVersion},
 							decl.PushButton{
-								AssignTo:  &s.btnUpdate,
-								Text:      "检查更新",
-								MaxSize:   decl.Size{Width: 100},
+								AssignTo: &s.btnUpdate,
+								Text:     "检查更新",
+								MaxSize:  decl.Size{Width: 100},
 								OnClicked: func() {
 									settingsCheckUpdate()
 								},
@@ -223,7 +272,7 @@ func openSettings(owner walk.Form) error {
 						VScroll:       true,
 						HScroll:       true,
 						Text:          readLogText(),
-						MinSize:       decl.Size{Height: 180},
+						MinSize:       decl.Size{Height: 150},
 						StretchFactor: 2,
 					},
 				},
@@ -378,6 +427,174 @@ func clearProxyFromSettings() {
 	setSettingsStatus("已清空代理，改为直连")
 }
 
+// describeDsh 用一句话说明"当前会怎么启动 dsh"，显示在设置窗口里。
+// 只给关键信息（哪个 exe），完整启动方式放 describeDshFull 里当 ToolTip，
+// 免得长路径被省略号截掉后又看不出全貌。
+func describeDsh() string {
+	l, err := resolveDshInstall()
+	if err != nil {
+		return "未找到 dsh：点「浏览…」选 dsh.exe，或把路径粘贴到上面"
+	}
+	src := "自动探测"
+	if strings.TrimSpace(dshPathFromConfig()) != "" {
+		src = "设置指定"
+	}
+	if len(l.prefix) > 0 {
+		return src + "：" + l.exe + " + bin.js"
+	}
+	return src + "：" + l.exe
+}
+
+// refreshDshStatus 重新计算并刷新说明行。
+func refreshDshStatus() {
+	note := describeDsh()
+	syncUI(func() {
+		if f := currentSettings(); f != nil && f.dshStatus != nil {
+			_ = f.dshStatus.SetText(note)
+		}
+	})
+}
+
+var winEnvRe = regexp.MustCompile(`%([^%]+)%`)
+
+// expandWinEnv 展开 %LOCALAPPDATA% 这种 Windows 风格的变量（Go 的 ExpandEnv 只认 $VAR）。
+func expandWinEnv(s string) string {
+	return winEnvRe.ReplaceAllStringFunc(s, func(m string) string {
+		if v := os.Getenv(m[1 : len(m)-1]); v != "" {
+			return v
+		}
+		return m
+	})
+}
+
+// normalizeDshPath 规整"粘贴进来的路径"：
+// 去掉引号与首尾空白、展开 %VAR%、给目录补上 dsh.exe。
+func normalizeDshPath(raw string) (string, error) {
+	p := strings.TrimSpace(raw)
+	p = strings.Trim(p, `"'`)
+	if p == "" {
+		return "", nil
+	}
+	p = expandWinEnv(p)
+	p = os.ExpandEnv(p)
+	st, err := os.Stat(p)
+	if err != nil {
+		return "", fmt.Errorf("路径不存在：%s", p)
+	}
+	if st.IsDir() {
+		for _, name := range []string{"dsh.exe", "dsh.cmd", "dsh.bat"} {
+			c := filepath.Join(p, name)
+			if fileExists(c) {
+				return c, nil
+			}
+		}
+		return "", fmt.Errorf("这个目录里没有 dsh.exe / dsh.cmd：%s", p)
+	}
+	return p, nil
+}
+
+// browseDshPath 打开文件选择框，选完直接保存并验证。
+func browseDshPath() {
+	s := currentSettings()
+	if s == nil || s.dlg == nil {
+		return
+	}
+	dlg := new(walk.FileDialog)
+	dlg.Title = "选择 dsh 启动器（dsh.exe / dsh.cmd）"
+	dlg.Filter = "dsh 启动器 (*.exe;*.cmd;*.bat)|*.exe;*.cmd;*.bat|所有文件 (*.*)|*.*"
+	// walk 的文件框没有单独的"初始文件"字段：文件名放 FilePath、目录放 InitialDirPath
+	if cur := strings.TrimSpace(s.dshEdit.Text()); cur != "" {
+		if p, err := normalizeDshPath(cur); err == nil && p != "" {
+			dlg.InitialDirPath = filepath.Dir(p)
+			dlg.FilePath = filepath.Base(p)
+		}
+	}
+	if dlg.InitialDirPath == "" {
+		for _, dir := range launcherDirs() {
+			if fileExists(filepath.Join(dir, "dsh.exe")) || fileExists(filepath.Join(dir, "dsh.cmd")) {
+				dlg.InitialDirPath = dir
+				break
+			}
+		}
+	}
+	ok, err := dlg.ShowOpen(s.dlg)
+	if err != nil {
+		setSettingsStatus("打开文件选择框失败：" + err.Error())
+		return
+	}
+	if !ok || dlg.FilePath == "" {
+		return
+	}
+	_ = s.dshEdit.SetText(dlg.FilePath)
+	saveDshPathFromSettings()
+}
+
+// saveDshPathFromSettings 保存手填/选中的 dsh 路径，并立刻跑一次 --version 验证。
+func saveDshPathFromSettings() {
+	s := currentSettings()
+	if s == nil || s.dshEdit == nil {
+		return
+	}
+	p, err := normalizeDshPath(s.dshEdit.Text())
+	if err != nil {
+		setSettingsStatus("dsh 路径无效：" + err.Error())
+		return
+	}
+	if err := setDshPath(p); err != nil {
+		setSettingsStatus("保存 dsh 路径失败：" + err.Error())
+		return
+	}
+	syncUI(func() {
+		if f := currentSettings(); f != nil {
+			_ = f.dshEdit.SetText(p)
+		}
+	})
+	refreshDshStatus()
+	if p == "" {
+		setSettingsStatus("已改为自动探测 → " + describeDsh())
+		return
+	}
+
+	l, rerr := resolveDshInstall()
+	if rerr != nil {
+		setSettingsStatus("已保存，但仍无法解析：" + rerr.Error())
+		return
+	}
+	setSettingsStatus("正在验证 " + p + " …")
+	go func() {
+		out, verr := runHiddenTimeout(30*time.Second, l.exe, l.argv("--version")...)
+		v := firstSemver(out)
+		if v == "" {
+			msg := "已保存，但执行失败"
+			if verr != nil {
+				msg += "：" + verr.Error()
+			}
+			if t := strings.TrimSpace(out); t != "" {
+				msg += "\r\n输出：" + t
+			}
+			setSettingsStatus(msg)
+			return
+		}
+		trayLogf("dsh 路径已保存：%s（%s），版本 %s", p, l.how, v)
+		setSettingsStatus("已保存并验证通过：dsh " + v + "（" + l.how + "）")
+	}()
+}
+
+// clearDshPathFromSettings 清空手填路径，回到自动探测。
+func clearDshPathFromSettings() {
+	if err := setDshPath(""); err != nil {
+		setSettingsStatus("清空 dsh 路径失败：" + err.Error())
+		return
+	}
+	syncUI(func() {
+		if f := currentSettings(); f != nil {
+			_ = f.dshEdit.SetText("")
+		}
+	})
+	refreshDshStatus()
+	setSettingsStatus("已改为自动探测 → " + describeDsh())
+}
+
 func applyAutoStartFromSettings() {
 	s := currentSettings()
 	if s == nil || s.chkAuto == nil {
@@ -394,7 +611,8 @@ func applyAutoStartFromSettings() {
 	setSettingsStatus(fmt.Sprintf("开机自启已设为 %v", want))
 }
 
-func applyAutoOpenFromSettings() {	s := currentSettings()
+func applyAutoOpenFromSettings() {
+	s := currentSettings()
 	if s == nil || s.chkAutoOpen == nil {
 		return
 	}

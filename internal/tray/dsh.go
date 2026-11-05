@@ -69,23 +69,83 @@ func candidateRoots() []string {
 		seen[strings.ToLower(p)] = true
 		roots = append(roots, p)
 	}
+	local := os.Getenv("LOCALAPPDATA")
+	appdata := os.Getenv("APPDATA")
+	userProfile := os.Getenv("USERPROFILE")
+
 	add(filepath.Join(os.Getenv("ProgramFiles"), "nodejs"))
 	add(`C:\Program Files\nodejs`)
 	// npm 的按用户安装前缀：dsh 装在 %APPDATA%\npm\node_modules 下
-	add(filepath.Join(os.Getenv("APPDATA"), "npm"))
+	add(filepath.Join(appdata, "npm"))
 	// node 本身在 PATH 里时，它的安装目录也可能就是全局包根
 	if ne, ok := findOnPath("node"); ok {
 		add(filepath.Dir(ne))
 	}
-	if appdata := os.Getenv("APPDATA"); appdata != "" {
-		if m, _ := filepath.Glob(filepath.Join(appdata, "nvm", "v*")); len(m) > 0 {
-			// 版本目录名按字符串倒序，尽量取新的
+
+	// 版本管理器：nvm-windows / fnm / mise / volta 的 node 目录，
+	// 它们各自把 node.exe 放在不同层级的子目录里。
+	for _, base := range []string{
+		filepath.Join(appdata, "nvm"),
+		filepath.Join(appdata, "fnm", "node-versions"),
+		filepath.Join(local, "fnm", "node-versions"),
+		filepath.Join(local, "mise", "installs", "node"),
+		filepath.Join(userProfile, ".local", "share", "mise", "installs", "node"),
+		filepath.Join(local, "Volta", "tools", "image", "node"),
+	} {
+		for _, pattern := range []string{"v*", "*", filepath.Join("*", "installation")} {
+			m, _ := filepath.Glob(filepath.Join(base, pattern))
+			// 目录名按字符串倒序，尽量先试新版本
 			for i := len(m) - 1; i >= 0; i-- {
 				add(m[i])
 			}
 		}
 	}
 	return roots
+}
+
+// launcherDirs 返回"可能放着 dsh / npm 启动器（shim）"的目录。
+//
+// 关键场景：mise（旧名 rtx）把 `mise use -g npm:@deepseek-ai/dsh` 装出来的命令
+// 生成成 `%LOCALAPPDATA%\mise\shims\dsh.exe`，既没有 node_modules 结构可探，
+// 又只在交互 shell 里把 shims 目录塞进 PATH。
+// 托盘从注册表 Run 键冷启动时 PATH 里没有它 → dsh 明明能用却报"找不到"。
+func launcherDirs() []string {
+	seen := map[string]bool{}
+	var dirs []string
+	add := func(p string) {
+		if p == "" || seen[strings.ToLower(p)] {
+			return
+		}
+		seen[strings.ToLower(p)] = true
+		dirs = append(dirs, p)
+	}
+	local := os.Getenv("LOCALAPPDATA")
+	add(filepath.Join(local, "mise", "shims"))
+	add(filepath.Join(os.Getenv("USERPROFILE"), ".local", "share", "mise", "shims"))
+	add(filepath.Join(local, "Volta", "bin"))
+	add(filepath.Join(local, "pnpm"))
+	add(filepath.Join(os.Getenv("APPDATA"), "npm"))
+	add(filepath.Join(os.Getenv("USERPROFILE"), "scoop", "shims"))
+	add(`C:\ProgramData\chocolatey\bin`)
+	add(filepath.Join(local, "Yarn", "bin"))
+	add(filepath.Join(os.Getenv("ProgramFiles"), "nodejs"))
+	return dirs
+}
+
+// findLauncher 先查 PATH，再查常见启动器目录。
+func findLauncher(name string) (string, bool) {
+	if p, ok := findOnPath(name); ok {
+		return p, true
+	}
+	for _, dir := range launcherDirs() {
+		for _, ext := range []string{".exe", ".cmd", ".bat"} {
+			p := filepath.Join(dir, name+ext)
+			if fileExists(p) {
+				return p, true
+			}
+		}
+	}
+	return "", false
 }
 
 // probeRoot 检查某个根目录下是否同时有 node.exe 和 dsh 的 bin.js。
@@ -156,63 +216,144 @@ func errDshNotFound() error {
 	return fmt.Errorf(`找不到 dsh，无法启动。
 
 本程序按以下顺序查找，都没找到：
-  1. 常见安装目录：%s、%s、%%APPDATA%%\npm、nvm 各版本目录
-  2. 系统环境变量 Path 里的 dsh 命令
+  1. 常见安装目录：%s、%%APPDATA%%\npm、nvm / fnm / mise / volta 的 node 目录
+  2. 命令行 PATH 里的 dsh
+  3. 版本管理器的 shim 目录：%%LOCALAPPDATA%%\mise\shims、
+     %%USERPROFILE%%\.local\share\mise\shims、%%LOCALAPPDATA%%\Volta\bin、
+     %%USERPROFILE%%\scoop\shims、%%LOCALAPPDATA%%\pnpm
 
 请这样处理：
-  · 打开命令提示符，执行：dsh --version
-  · 如果能输出版本号 → 说明 dsh 已可用但本程序没识别到。
-    请执行：where dsh
-    把输出结果告诉我，或直接重装本程序的最新版本。
-  · 如果提示「不是内部或外部命令」→ 说明 dsh 没加进 Path：
-    把 npm 全局目录（一般是 %%APPDATA%%\npm，或 node 的安装目录）
+  · 打开命令提示符，执行：where dsh
+  · 能看到路径 → 本程序没识别到它（可能是新装的版本管理器），
+    请把最新版托盘程序装上再试；
+    临时办法：在「系统属性 → 环境变量」里新建用户变量
+    DSH_TRAY_DSH = <where dsh 输出的那个路径>，保存后重启本程序。
+  · 提示「不是内部或外部命令」→ 说明 dsh 没装或没进 PATH：
+    先在终端里执行 dsh --version 确认可用，
+    再把它的安装目录（npm 全局目录、或版本管理器的 shims 目录）
     加入「系统属性 → 环境变量 → Path」，保存后重启本程序。`,
-		filepath.Join(os.Getenv("ProgramFiles"), "nodejs"), `C:\Program Files\nodejs`)
+		filepath.Join(os.Getenv("ProgramFiles"), "nodejs"))
 }
 
-// ResolveDsh 定位 node.exe 与 dsh 的 bin.js。
-// 直接用 node 启动 bin.js，避免经过 cmd.exe 的批处理壳，窗口更干净。
+// launch 描述"怎么启动一个 npm 全局命令"：
+//   - node 模式：exe = node.exe，prefix = [bin.js]（不经过 cmd.exe，窗口更干净）
+//   - shim 模式：exe = 启动器本身（如 mise 的 dsh.exe），
+//     或 cmd.exe + [/c 启动器.cmd]
 //
-// 查找顺序：常见安装根目录 → PATH 里的 dsh 启动器反推 → node 所在目录。
-// 这样即使用户把 npm 前缀装到了非常规位置，只要 dsh 在 PATH 里就能用。
-func ResolveDsh() (nodeExe, binJS string, err error) {
-	// 1) 常见安装根目录
+// 为什么需要 shim 模式：mise / volta / scoop 装出来的命令是个**转发器**，
+// 目录里既没有 node_modules 也没有可解析的 .cmd 文本，只能直接执行它。
+type launch struct {
+	exe    string
+	prefix []string
+	how    string // 人类可读的启动方式，写进日志便于跨机器排查
+}
+
+// argv 拼出完整参数（固定前缀 + 本次参数）。
+func (l launch) argv(extra ...string) []string {
+	out := make([]string, 0, len(l.prefix)+len(extra))
+	out = append(out, l.prefix...)
+	return append(out, extra...)
+}
+
+// launchFromLauncher 把一个启动器文件包装成可执行方案。
+func launchFromLauncher(p string) (launch, bool) {
+	if p == "" || !fileExists(p) {
+		return launch{}, false
+	}
+	switch strings.ToLower(filepath.Ext(p)) {
+	case ".cmd", ".bat":
+		// 批处理必须经 cmd.exe 才能执行
+		comspec := os.Getenv("ComSpec")
+		if comspec == "" {
+			comspec = filepath.Join(os.Getenv("SystemRoot"), "System32", "cmd.exe")
+		}
+		return launch{exe: comspec, prefix: []string{"/c", p}, how: "cmd /c " + p}, true
+	default:
+		return launch{exe: p, how: p}, true
+	}
+}
+
+// resolveDshInstall 定位"怎么启动 dsh"。
+//
+// 顺序：设置里手填 → 环境变量 → 常见 node 根目录里的 bin.js
+// → PATH/shim 目录里的 dsh 启动器 → PATH 里 node 所在目录。
+func resolveDshInstall() (launch, error) {
+	// 0) 设置里手填的路径（最可靠，跨机器/版本管理器场景优先用它）
+	if p := strings.TrimSpace(dshPathFromConfig()); p != "" {
+		if l, ok := launchFromLauncher(p); ok {
+			return l, nil
+		}
+		trayLogf("设置里指定的 dsh 路径不可用，改回自动探测：%s", p)
+	}
+
+	// 1) 环境变量显式指定（不改配置也能临时指定）
+	if p := strings.TrimSpace(os.Getenv("DSH_TRAY_DSH")); p != "" {
+		if l, ok := launchFromLauncher(p); ok {
+			return l, nil
+		}
+		trayLogf("环境变量 DSH_TRAY_DSH 指向的文件不存在，改回自动探测：%s", p)
+	}
+
+	// 2) 常见安装根目录：node.exe + node_modules/@deepseek-ai/dsh/lib/bin.js
 	for _, root := range candidateRoots() {
 		if ne, bj, ok := probeRoot(root); ok {
-			return ne, bj, nil
+			return launch{exe: ne, prefix: []string{bj}, how: "node " + bj}, nil
 		}
 	}
 
-	// 2) PATH 里的 dsh：先看同目录能不能凑齐 node+bin.js，再从 shim 内容抠路径
-	if shim, ok := findOnPath("dsh"); ok {
-		if ne, bj, ok := probeRoot(filepath.Dir(shim)); ok {
-			return ne, bj, nil
+	// 3) dsh 启动器（PATH 或版本管理器的 shims 目录）
+	if shim, ok := findLauncher("dsh"); ok {
+		// 3a) 同目录就有完整安装（volta / npm 前缀布局）
+		if ne, bj, ok2 := probeRoot(filepath.Dir(shim)); ok2 {
+			return launch{exe: ne, prefix: []string{bj}, how: "node " + bj}, nil
 		}
+		// 3b) .cmd 里能抠出 bin.js 且 node 可用 → 仍然走 node 模式
 		if bj := binJSFromShim(shim); bj != "" {
-			if ne, ok := findOnPath("node"); ok {
-				return ne, bj, nil
+			if ne, ok2 := findOnPath("node"); ok2 {
+				return launch{exe: ne, prefix: []string{bj}, how: "node " + bj}, nil
 			}
-			// node 不在 PATH，但 bin.js 的同级目录里通常有 node
+			// node 不在 PATH，但 bin.js 往上四层通常就是 node 安装根
 			if ne := filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(bj)))), "node.exe"); fileExists(ne) {
-				return ne, bj, nil
+				return launch{exe: ne, prefix: []string{bj}, how: "node " + bj}, nil
 			}
+		}
+		// 3c) 直接执行启动器（mise 的 dsh.exe 属于这一类）
+		if l, ok2 := launchFromLauncher(shim); ok2 {
+			return l, nil
 		}
 	}
 
-	// 3) node 在 PATH：用它的安装目录当全局包根
+	// 4) node 在 PATH：用它的安装目录当全局包根
 	if ne, ok := findOnPath("node"); ok {
 		if _, bj, ok2 := probeRoot(filepath.Dir(ne)); ok2 {
-			return ne, bj, nil
+			return launch{exe: ne, prefix: []string{bj}, how: "node " + bj}, nil
 		}
 	}
 
-	return "", "", errDshNotFound()
+	return launch{}, errDshNotFound()
 }
 
-// DshDir 返回已安装 dsh 包的目录。
+// ResolveDsh 返回 node.exe 与 bin.js（仅 node 模式可用）。
+// 供自检/版本查询使用；shim 模式下这两个值没有意义，用 resolveDshInstall 取代。
+func ResolveDsh() (nodeExe, binJS string, err error) {
+	l, err := resolveDshInstall()
+	if err != nil {
+		return "", "", err
+	}
+	if len(l.prefix) == 0 {
+		return "", "", fmt.Errorf("dsh 通过启动器运行：%s", l.how)
+	}
+	return l.exe, l.prefix[0], nil
+}
+
+// DshDir 返回已安装 dsh 包的目录（拿不到时返回空串）。
 func DshDir() string {
-	if _, binJS, err := ResolveDsh(); err == nil {
-		return filepath.Dir(filepath.Dir(binJS)) // bin.js → lib → dsh
+	if l, err := resolveDshInstall(); err == nil {
+		for _, a := range l.prefix {
+			if strings.EqualFold(filepath.Base(a), "bin.js") {
+				return filepath.Dir(filepath.Dir(a)) // bin.js → lib → dsh
+			}
+		}
 	}
 	for _, root := range candidateRoots() {
 		dir := filepath.Join(root, "node_modules", "@deepseek-ai", "dsh")
@@ -240,7 +381,7 @@ func (d *Dsh) Start() error {
 
 // StartWithArgs 静默启动 dsh，args 为传给 bin.js 的完整参数（含子命令）。
 func (d *Dsh) StartWithArgs(args []string) error {
-	nodeExe, binJS, err := ResolveDsh()
+	inst, err := resolveDshInstall()
 	if err != nil {
 		trayLogf("启动失败：%v", err)
 		return err
@@ -266,7 +407,7 @@ func (d *Dsh) StartWithArgs(args []string) error {
 	d.readyOffset = fileSize(d.logPath)
 	d.mu.Unlock()
 
-	cmd := exec.Command(nodeExe, append([]string{binJS}, args...)...)
+	cmd := exec.Command(inst.exe, inst.argv(args...)...)
 	// 注意：工作目录不能用 dsh 安装目录（Program Files 只读，dsh 启动会卡住）。
 	// 用用户主目录，与手动在终端里跑 dsh 的行为一致。
 	cmd.Dir = workDir()
@@ -275,11 +416,11 @@ func (d *Dsh) StartWithArgs(args []string) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 
 	if err := cmd.Start(); err != nil {
-		trayLogf("启动失败（无法创建进程）：%v", err)
+		trayLogf("启动失败（无法创建进程）：%v（启动方式 %s）", err, inst.how)
 		f.Close()
 		return err
 	}
-	trayLogf("已启动 dsh，PID=%d，工作目录=%s", cmd.Process.Pid, cmd.Dir)
+	trayLogf("已启动 dsh，PID=%d，工作目录=%s，启动方式=%s", cmd.Process.Pid, cmd.Dir, inst.how)
 	// 子进程已复制句柄，父进程这边可以关掉。
 	f.Close()
 

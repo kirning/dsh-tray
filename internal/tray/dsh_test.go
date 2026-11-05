@@ -287,3 +287,120 @@ func TestCompareSemver(t *testing.T) {
 		}
 	}
 }
+
+// 设置里粘贴的路径要能被接受：带引号、带 %VAR%、只给目录，都要归一化成可执行文件。
+func TestNormalizeDshPath(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "dsh.exe")
+	if err := os.WriteFile(exe, []byte("stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("DSH_TEST_ROOT", dir)
+
+	t.Run("带引号的完整路径", func(t *testing.T) {
+		got, err := normalizeDshPath(`"` + exe + `"`)
+		if err != nil || got != exe {
+			t.Fatalf("got %q, err %v", got, err)
+		}
+	})
+
+	t.Run("展开百分号变量", func(t *testing.T) {
+		got, err := normalizeDshPath(`%DSH_TEST_ROOT%\dsh.exe`)
+		if err != nil || got != exe {
+			t.Fatalf("got %q, err %v", got, err)
+		}
+	})
+
+	t.Run("只给目录时补 dsh.exe", func(t *testing.T) {
+		got, err := normalizeDshPath(dir)
+		if err != nil || got != exe {
+			t.Fatalf("got %q, err %v", got, err)
+		}
+	})
+
+	t.Run("空串表示自动探测", func(t *testing.T) {
+		got, err := normalizeDshPath("   ")
+		if err != nil || got != "" {
+			t.Fatalf("got %q, err %v", got, err)
+		}
+	})
+
+	t.Run("路径不存在要报错", func(t *testing.T) {
+		if _, err := normalizeDshPath(filepath.Join(dir, "nope.exe")); err == nil {
+			t.Fatal("不存在的路径应报错")
+		}
+	})
+}
+
+// mise 之类版本管理器的启动器是 exe，直接执行；npm 的 .cmd 必须经命令行解释器。
+func TestLaunchFromLauncher(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "dsh.exe")
+	batch := filepath.Join(dir, "dsh.cmd")
+	for _, p := range []string{exe, batch} {
+		if err := os.WriteFile(p, []byte("stub"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	l, ok := launchFromLauncher(exe)
+	if !ok || l.prefix != nil || l.exe != exe {
+		t.Fatalf("exe 应直接执行，got %+v ok=%v", l, ok)
+	}
+
+	l, ok = launchFromLauncher(batch)
+	if !ok {
+		t.Fatal(".cmd 也应可用")
+	}
+	if len(l.prefix) != 2 || l.prefix[0] != "/c" || l.prefix[1] != batch {
+		t.Fatalf("cmd 应经解释器 /c，got %+v", l)
+	}
+	if strings.EqualFold(filepath.Base(l.exe), filepath.Base(batch)) {
+		t.Fatalf("exe 不应是批处理文件本身: %s", l.exe)
+	}
+
+	if _, ok := launchFromLauncher(filepath.Join(dir, "missing.exe")); ok {
+		t.Fatal("文件不存在时不应可用")
+	}
+}
+
+// mise 把命令装成 %LOCALAPPDATA%\mise\shims\dsh.exe，且只在交互 shell 里把
+// 这个目录塞进 PATH；托盘冷启动时必须能自己找过去（用户机器上就是这么报"找不到 dsh"的）。
+func TestFindLauncherInMiseShims(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "mise", "shims")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(dir, "dsh.exe")
+	if err := os.WriteFile(exe, []byte("stub"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("LOCALAPPDATA", root)
+	t.Setenv("PATH", "") // 确认不是碰巧从 PATH 里找到的
+
+	got, ok := findLauncher("dsh")
+	if !ok {
+		t.Fatalf("应在 mise shims 目录里找到 dsh：%s", dir)
+	}
+	if filepath.Clean(got) != filepath.Clean(exe) {
+		t.Fatalf("got %s, want %s", got, exe)
+	}
+}
+
+// 版本号提取：mise 下拿不到 package.json，只能从 dsh --version 的输出里抠。
+func TestFirstSemver(t *testing.T) {
+	cases := map[string]string{
+		"0.2.1-rc.5":                            "0.2.1-rc.5",
+		"dsh 0.2.1-rc.5":                        "0.2.1-rc.5",
+		"\x1b[32m@deepseek-ai/dsh\x1b[0m 0.2.1": "0.2.1",
+		"node v24.19.0 / dsh 0.2.0":             "24.19.0",
+		"没有版本号":                                 "",
+		"v1.2.3-beta.1+build.5 已安装":             "1.2.3-beta.1",
+	}
+	for in, want := range cases {
+		if got := firstSemver(in); got != want {
+			t.Errorf("firstSemver(%q)=%q，期望 %q", in, got, want)
+		}
+	}
+}

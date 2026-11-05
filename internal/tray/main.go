@@ -17,7 +17,7 @@ const pkgName = "@deepseek-ai/dsh"
 
 // appVersion 应用自身版本（与被管理的 dsh 版本无关）。
 // 用 var 而非 const，便于构建时用 -ldflags "-X main.appVersion=x.y.z" 覆盖。
-var appVersion = "1.6.0"
+var appVersion = "1.7.0"
 
 var (
 	dsh *Dsh
@@ -101,6 +101,10 @@ func ensureSingleInstance() bool {
 // Run 是程序入口。args 为命令行参数（不含程序名）。
 // 支持隐藏自检参数：--selftest / --uitest / --starttest。
 func Run(args []string) {
+	// 配置要最先读：隐藏自检模式也要看到真实的 dshPath / 代理设置，
+	// 否则自检结果和用户实际运行时不一致（排查过这个坑）。
+	loadConfig()
+
 	for _, a := range args {
 		if a == "--selftest" {
 			selftest()

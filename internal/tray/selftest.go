@@ -17,12 +17,18 @@ func selftest() {
 
 	w("=== dsh-tray %s selftest %s ===", appVersion, time.Now().Format("2006-01-02 15:04:05"))
 
-	nodeExe, binJS, err := ResolveDsh()
+	l, err := resolveDshInstall()
 	if err != nil {
-		w("[FAIL] ResolveDsh: %v", err)
+		w("[FAIL] resolveDshInstall: %v", err)
 	} else {
-		w("[ OK ] node   = %s", nodeExe)
-		w("[ OK ] bin.js = %s", binJS)
+		w("[ OK ] 启动方式 = %s", l.how)
+		w("[ OK ] exe     = %s", l.exe)
+		if len(l.prefix) > 0 {
+			w("[ OK ] 前缀参数 = %v", l.prefix)
+		}
+		if cfgPath := dshPathFromConfig(); cfgPath != "" {
+			w("[ .. ] 设置里指定的路径 = %s", cfgPath)
+		}
 	}
 
 	if cur, e := CurrentVersion(); e != nil {
