@@ -2,14 +2,14 @@
   "FixedFileInfo": {
     "FileVersion": {
       "Major": 1,
-      "Minor": 5,
-      "Patch": 1,
+      "Minor": 6,
+      "Patch": 0,
       "Build": 0
     },
     "ProductVersion": {
       "Major": 1,
-      "Minor": 5,
-      "Patch": 1,
+      "Minor": 6,
+      "Patch": 0,
       "Build": 0
     },
     "FileFlagsMask": "3f",
@@ -22,12 +22,12 @@
     "Comments": "dsh web 托盘管理器",
     "CompanyName": "",
     "FileDescription": "dsh 托盘",
-    "FileVersion": "1.5.1.0",
+    "FileVersion": "1.6.0.0",
     "InternalName": "dsh-tray",
     "LegalCopyright": "",
     "OriginalFilename": "dsh-tray.exe",
     "ProductName": "dsh 托盘",
-    "ProductVersion": "1.5.1.0"
+    "ProductVersion": "1.6.0.0"
   },
   "VarFileInfo": {
     "Translation": {

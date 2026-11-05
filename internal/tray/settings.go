@@ -1,7 +1,10 @@
 package tray
 
 import (
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,6 +22,8 @@ type settingsForm struct {
 
 	chkAuto     *walk.CheckBox
 	chkAutoOpen *walk.CheckBox
+
+	tokenEdit *walk.LineEdit
 
 	versionLabel *walk.Label
 	btnUpdate    *walk.PushButton
@@ -63,8 +68,8 @@ func openSettings(owner walk.Form) error {
 	err := (decl.Dialog{
 		AssignTo: &dlg,
 		Title:    "设置 - " + appName,
-		Size:     decl.Size{Width: 780, Height: 720},
-		MinSize:  decl.Size{Width: 720, Height: 600},
+		Size:     decl.Size{Width: 780, Height: 780},
+		MinSize:  decl.Size{Width: 720, Height: 660},
 		Layout:   decl.VBox{Margins: decl.Margins{Left: 14, Top: 12, Right: 14, Bottom: 12}, Spacing: 10},
 		Children: []decl.Widget{
 			decl.GroupBox{
@@ -154,6 +159,33 @@ func openSettings(owner walk.Form) error {
 							decl.HSpacer{},
 						},
 					},
+					// GitHub 匿名配额 60 次/小时且按出口 IP 算，公司网/代理出口极易被耗光，
+					// 填了令牌提到 5000 次/小时；装了 gh 并登录过会自动复用，不用手填。
+					decl.Composite{
+						Layout: decl.HBox{Spacing: 6},
+						Children: []decl.Widget{
+							decl.Label{Text: "GitHub Token（可选）："},
+							decl.LineEdit{
+								AssignTo:     &s.tokenEdit,
+								Text:         gitHubTokenFromConfig(),
+								PasswordMode: true,
+								MinSize:      decl.Size{Width: 260, Height: 22},
+								CueBanner:    "留空则用匿名配额；装了 gh 且已登录时会自动复用",
+							},
+							decl.PushButton{
+								Text:      "保存",
+								MaxSize:   decl.Size{Width: 70},
+								OnClicked: func() { saveTokenFromSettings() },
+							},
+							decl.PushButton{
+								Text:      "清空",
+								MaxSize:   decl.Size{Width: 70},
+								OnClicked: func() { clearTokenFromSettings() },
+							},
+							decl.HSpacer{},
+						},
+					},
+					decl.Label{Text: "匿名访问 60 次/小时（按出口 IP 算），带令牌 5000 次/小时。只用于查/下载本程序的 Release。"},
 					decl.ProgressBar{
 						AssignTo: &s.progress,
 						MinValue: 0,
@@ -362,8 +394,7 @@ func applyAutoStartFromSettings() {
 	setSettingsStatus(fmt.Sprintf("开机自启已设为 %v", want))
 }
 
-func applyAutoOpenFromSettings() {
-	s := currentSettings()
+func applyAutoOpenFromSettings() {	s := currentSettings()
 	if s == nil || s.chkAutoOpen == nil {
 		return
 	}
@@ -375,6 +406,103 @@ func applyAutoOpenFromSettings() {
 	syncSettingsToggles()
 	trayLogf("设置：启动后自动打开web = %v（启动参数 %v）", want, startArgs())
 	setSettingsStatus(fmt.Sprintf("启动后自动打开web已设为 %v（启动参数 %v）", want, startArgs()))
+}
+
+// saveTokenFromSettings 保存手填的 GitHub 令牌（提高 API 配额）。
+func saveTokenFromSettings() {
+	s := currentSettings()
+	if s == nil || s.tokenEdit == nil {
+		return
+	}
+	token := strings.TrimSpace(s.tokenEdit.Text())
+	if err := setGitHubToken(token); err != nil {
+		setSettingsStatus("保存 GitHub Token 失败：" + err.Error())
+		return
+	}
+	if token == "" {
+		setSettingsStatus("已清空 GitHub Token，改为匿名访问（装了 gh 时会自动复用它的令牌）")
+		return
+	}
+	// 立刻验证一次：令牌无效的话现在就说，别等到下次检查更新才发现
+	go func() {
+		ok, note, err := verifyGitHubToken()
+		if err != nil {
+			setSettingsStatus("GitHub 连通性检查失败：" + err.Error())
+			return
+		}
+		if ok {
+			setSettingsStatus("GitHub Token 已保存并验证通过（" + note + "）")
+			return
+		}
+		setSettingsStatus("GitHub Token 已保存，但校验不通过：" + note)
+	}()
+}
+
+func clearTokenFromSettings() {
+	if err := setGitHubToken(""); err != nil {
+		setSettingsStatus("清空 GitHub Token 失败：" + err.Error())
+		return
+	}
+	syncUI(func() {
+		if f := currentSettings(); f != nil && f.tokenEdit != nil {
+			_ = f.tokenEdit.SetText("")
+		}
+	})
+	setSettingsStatus("已清空 GitHub Token")
+}
+
+// verifyGitHubToken 用 /rate_limit 校验令牌：它免费（不占配额），能同时看出
+// 令牌是否有效、以及当前限额（匿名 60 / 带令牌 5000）。
+func verifyGitHubToken() (ok bool, note string, err error) {
+	req, err := http.NewRequest(http.MethodGet, "https://api.github.com/rate_limit", nil)
+	if err != nil {
+		return false, "", err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("User-Agent", "dsh-tray/"+appVersion)
+	applyGitHubAuth(req)
+
+	resp, err := doRoute(req, metaTimeout, proxyRoutes()[0]) // 先用配置的首选链路
+	if err != nil {
+		return false, "", err
+	}
+	if resp.StatusCode != http.StatusOK {
+		// 换个链路再试（令牌失效时不需要换链路，但限流时换链路有意义）
+		resp.Body.Close()
+		for _, rt := range proxyRoutes()[1:] {
+			r2, e2 := doRoute(req, metaTimeout, rt)
+			if e2 != nil {
+				continue
+			}
+			if r2.StatusCode == http.StatusOK {
+				resp = r2
+				break
+			}
+			r2.Body.Close()
+		}
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		return false, fmt.Sprintf("HTTP %d", resp.StatusCode), nil
+	}
+	defer resp.Body.Close()
+
+	var rl struct {
+		Resources struct {
+			Core struct {
+				Limit int `json:"limit"`
+				Left  int `json:"remaining"`
+			} `json:"core"`
+		} `json:"resources"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rl); err != nil {
+		return false, "", err
+	}
+	limit := rl.Resources.Core.Limit
+	if limit <= 0 {
+		return false, "响应里没有 rate limit 信息", nil
+	}
+	return limit > 60, fmt.Sprintf("限额 %d 次/小时，剩余 %d", limit, rl.Resources.Core.Left), nil
 }
 
 func refreshLogView() {

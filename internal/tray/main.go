@@ -17,7 +17,7 @@ const pkgName = "@deepseek-ai/dsh"
 
 // appVersion 应用自身版本（与被管理的 dsh 版本无关）。
 // 用 var 而非 const，便于构建时用 -ldflags "-X main.appVersion=x.y.z" 覆盖。
-var appVersion = "1.5.1"
+var appVersion = "1.6.0"
 
 var (
 	dsh *Dsh

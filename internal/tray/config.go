@@ -21,6 +21,11 @@ type Config struct {
 	// AutoStart 是「开机自启」的一份同步副本（真正生效的是注册表 Run 键）。
 	// 用指针区分"没写过"和"明确写了 false"。
 	AutoStart *bool `json:"autoStart,omitempty"`
+
+	// GithubToken 是可选的 GitHub 个人访问令牌，只用于查/下载本程序的 Release。
+	// 匿名访问 api.github.com 只有 60 次/小时、按出口 IP 算，公司/代理出口常被用光；
+	// 带上令牌是 5000 次/小时，基本不会再撞限流。留空则依次尝试环境变量与 gh CLI。
+	GithubToken string `json:"githubToken,omitempty"`
 }
 
 func defaultConfig() Config {
@@ -96,6 +101,18 @@ func setProxyConfig(addr, scheme string) error {
 // setProxyScheme 只更新协议（运行时从 SOCKS5 回退到 HTTP 时用）。
 func setProxyScheme(scheme string) error {
 	return updateConfig(func(c *Config) { c.ProxyScheme = scheme })
+}
+
+// gitHubTokenFromConfig 返回配置里手填的令牌（空串表示没填）。
+func gitHubTokenFromConfig() string {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	return cfg.GithubToken
+}
+
+// setGitHubToken 保存/清空手填的令牌。
+func setGitHubToken(token string) error {
+	return updateConfig(func(c *Config) { c.GithubToken = token })
 }
 
 // syncAutoStartMirror 把注册表里真实的开机自启状态同步一份到 config.json。

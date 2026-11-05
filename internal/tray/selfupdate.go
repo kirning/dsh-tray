@@ -7,9 +7,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -92,6 +94,75 @@ func doWithTimeout(req *http.Request, d time.Duration) (*http.Response, error) {
 	return resp2, nil
 }
 
+// ---------- GitHub 令牌 ----------
+
+var (
+	ghTokenOnce sync.Once
+	ghTokenVal  string
+)
+
+// githubToken 找一个可用的 GitHub 令牌，顺序：设置里手填 → 环境变量 → gh CLI。
+//
+// 为什么要令牌：api.github.com 的匿名配额只有 **60 次/小时，按出口 IP 算**。
+// 本机实测两个出口都是 0/60（代理出口 203.10.98.186 被共用、公司出口 218.13.14.224
+// 也一样），所以"回退直连"并不能保证查得通；带上令牌是 5000 次/小时，基本不会撞限流。
+// gh 的令牌存在系统凭据管理器里，只能问 `gh auth token`。
+func githubToken() string {
+	if t := strings.TrimSpace(gitHubTokenFromConfig()); t != "" {
+		return t
+	}
+	for _, k := range []string{"GITHUB_TOKEN", "GH_TOKEN"} {
+		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+			return v
+		}
+	}
+	ghTokenOnce.Do(func() { ghTokenVal = readGhToken() })
+	return ghTokenVal
+}
+
+// ghCandidates 返回可能的 gh 可执行文件路径（PATH 里没有时兜底常见安装位置）。
+func ghCandidates() []string {
+	var list []string
+	if p, err := exec.LookPath("gh"); err == nil {
+		list = append(list, p)
+	}
+	if base := os.Getenv("LOCALAPPDATA"); base != "" {
+		p := filepath.Join(base, "Programs", "gh", "gh.exe")
+		if fileExists(p) {
+			list = append(list, p)
+		}
+	}
+	if base := os.Getenv("ProgramFiles"); base != "" {
+		p := filepath.Join(base, "GitHub CLI", "gh.exe")
+		if fileExists(p) {
+			list = append(list, p)
+		}
+	}
+	return list
+}
+
+// readGhToken 问一次 gh 要令牌；没装、没登录、超时都当没有（不打扰用户）。
+func readGhToken() string {
+	for _, exe := range ghCandidates() {
+		out, err := runHiddenTimeout(8*time.Second, exe, "auth", "token")
+		if err != nil {
+			continue
+		}
+		if t := strings.TrimSpace(out); t != "" && !strings.ContainsAny(t, " \r\n") {
+			trayLogf("已从 gh CLI 取得 GitHub 令牌（用于提高 API 配额）")
+			return t
+		}
+	}
+	return ""
+}
+
+// applyGitHubAuth 给请求带上令牌（没有就匿名）。
+func applyGitHubAuth(req *http.Request) {
+	if t := githubToken(); t != "" {
+		req.Header.Set("Authorization", "Bearer "+t)
+	}
+}
+
 // ---------- 出网链路（代理 / 直连）----------
 
 // proxyRoute 是一条可尝试的出网链路。
@@ -172,6 +243,7 @@ func latestRelease() (releaseInfo, error) {
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "dsh-tray/"+appVersion)
+	applyGitHubAuth(req)
 
 	var problems []string
 	for _, rt := range proxyRoutes() {
@@ -201,7 +273,9 @@ func latestRelease() (releaseInfo, error) {
 		trayLogf("查询 release 失败（%s）：%s", rt.label, problem)
 	}
 	return rel, fmt.Errorf("访问 GitHub 失败（已依次尝试 %d 条链路）：\r\n%s\r\n\r\n"+
-		"提示：GitHub 匿名接口有速率限制，代理出口 IP 常被用光；可在「设置」里清空代理走直连，或稍后重试。",
+		"提示：GitHub 匿名接口限速 60 次/小时且按出口 IP 算，公司网/代理出口很容易被别人用光。"+
+		"可在「设置」里清空代理走直连，或填一个 GitHub Token（限速提高到 5000 次/小时；"+
+		"本机装了 gh 并登录过时会自动复用，无需填写）。",
 		len(problems), strings.Join(problems, "\r\n"))
 }
 
@@ -281,6 +355,7 @@ func openAsset(url string, have int64) (*http.Response, string, error) {
 		// API 资产端点必须带这个 Accept 才会返回二进制流而不是 JSON
 		req.Header.Set("Accept", "application/octet-stream")
 		req.Header.Set("User-Agent", "dsh-tray/"+appVersion)
+		applyGitHubAuth(req)
 		if have > 0 {
 			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
 		}
