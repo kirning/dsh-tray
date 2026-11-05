@@ -232,6 +232,7 @@ func fileExists(p string) bool {
 // 是否带 --no-open 由配置项「启动后自动打开web」决定。
 func (d *Dsh) Start() error {
 	if d.IsRunning() {
+		trayLogf("启动被忽略：dsh web 已在运行")
 		return fmt.Errorf("dsh web 已在运行")
 	}
 	return d.StartWithArgs(startArgs())
@@ -241,33 +242,29 @@ func (d *Dsh) Start() error {
 func (d *Dsh) StartWithArgs(args []string) error {
 	nodeExe, binJS, err := ResolveDsh()
 	if err != nil {
+		trayLogf("启动失败：%v", err)
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(d.logPath), 0o755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(d.logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	// 日志策略：每次启动 dsh 都清空，只保留本次启动的内容（用户选定）。
+	// dsh 的 stdout/stderr 直接继承这个句柄，之后的全部输出都落在本次日志里。
+	f, err := openFreshLog(d.logPath)
 	if err != nil {
+		trayLogf("启动失败（无法打开日志文件）：%v", err)
 		return err
 	}
-	// 记录本次启动的时刻，之后只在这之后的日志里找"就绪"标志
-	d.mu.Lock()
-	d.ready = false
-	d.portSince = time.Time{}
-	if st, e := f.Stat(); e == nil {
-		d.readyOffset = st.Size()
-	} else {
-		d.readyOffset = 0
-	}
-	d.mu.Unlock()
-
-	fmt.Fprintf(f, "\r\n===== %s  启动 dsh %s =====\r\n",
-		time.Now().Format("2006-01-02 15:04:05"), strings.Join(args, " "))
+	_, _ = f.WriteString(freshLogHeader(args, time.Now()))
 
 	// 上次异常退出可能留下僵尸凭证锁，先尝试清理，否则本次启动会直接失败
 	if lockPath, removed := clearStaleCredLock(); removed {
-		fmt.Fprintf(f, "[tray] 已清理僵尸锁: %s\r\n", lockPath)
+		trayLogf("已清理僵尸锁: %s", lockPath)
 	}
+
+	// 就绪扫描只从本次启动之后的内容开始，避免把历史日志里的旧标志当成本次就绪
+	d.mu.Lock()
+	d.ready = false
+	d.portSince = time.Time{}
+	d.readyOffset = fileSize(d.logPath)
+	d.mu.Unlock()
 
 	cmd := exec.Command(nodeExe, append([]string{binJS}, args...)...)
 	// 注意：工作目录不能用 dsh 安装目录（Program Files 只读，dsh 启动会卡住）。
@@ -278,9 +275,11 @@ func (d *Dsh) StartWithArgs(args []string) error {
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 
 	if err := cmd.Start(); err != nil {
+		trayLogf("启动失败（无法创建进程）：%v", err)
 		f.Close()
 		return err
 	}
+	trayLogf("已启动 dsh，PID=%d，工作目录=%s", cmd.Process.Pid, cmd.Dir)
 	// 子进程已复制句柄，父进程这边可以关掉。
 	f.Close()
 
@@ -597,8 +596,10 @@ func (d *Dsh) Stop() error {
 	_, _ = clearStaleCredLock()
 
 	if lastErr != nil && len(findPidsByPort(d.Port())) > 0 {
+		trayLogf("停止 dsh 未完全成功：%v", lastErr)
 		return lastErr
 	}
+	trayLogf("已停止 dsh web（目标 PID: %v）", targets)
 	return nil
 }
 

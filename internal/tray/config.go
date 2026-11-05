@@ -12,11 +12,24 @@ type Config struct {
 	// AutoOpenWeb 为 true 时启动 dsh 不带 --no-open（dsh 自己会打开浏览器）；
 	// 为 false 时带 --no-open，启动后不弹浏览器。
 	AutoOpenWeb bool `json:"autoOpenWeb"`
+
+	// Proxy 是用户输入的代理地址（ip:端口），空串表示直连。
+	Proxy string `json:"proxy,omitempty"`
+	// ProxyScheme 是探测/指定出来的协议：socks5 / http / https。
+	ProxyScheme string `json:"proxyScheme,omitempty"`
+
+	// AutoStart 是「开机自启」的一份同步副本（真正生效的是注册表 Run 键）。
+	// 用指针区分"没写过"和"明确写了 false"。
+	AutoStart *bool `json:"autoStart,omitempty"`
+}
+
+func defaultConfig() Config {
+	return Config{AutoOpenWeb: true} // 默认：启动后自动打开 web（与历史行为一致）
 }
 
 var (
 	cfgMu sync.Mutex
-	cfg   = Config{AutoOpenWeb: true} // 默认：启动后自动打开 web（与历史行为一致）
+	cfg   = defaultConfig()
 )
 
 func configPath() string {
@@ -29,7 +42,7 @@ func loadConfig() {
 	if err != nil {
 		return
 	}
-	c := Config{AutoOpenWeb: true} // 缺字段时也按 true 处理
+	c := defaultConfig() // 缺字段时按默认值处理
 	if err := json.Unmarshal(raw, &c); err != nil {
 		return
 	}
@@ -38,15 +51,10 @@ func loadConfig() {
 	cfgMu.Unlock()
 }
 
-func autoOpenWeb() bool {
+// updateConfig 在持锁状态下修改配置，然后整体落盘。
+func updateConfig(edit func(*Config)) error {
 	cfgMu.Lock()
-	defer cfgMu.Unlock()
-	return cfg.AutoOpenWeb
-}
-
-func setAutoOpenWeb(v bool) error {
-	cfgMu.Lock()
-	cfg.AutoOpenWeb = v
+	edit(&cfg)
 	snapshot := cfg
 	cfgMu.Unlock()
 
@@ -58,6 +66,43 @@ func setAutoOpenWeb(v bool) error {
 		return err
 	}
 	return os.WriteFile(configPath(), append(raw, '\n'), 0o644)
+}
+
+func autoOpenWeb() bool {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	return cfg.AutoOpenWeb
+}
+
+func setAutoOpenWeb(v bool) error {
+	return updateConfig(func(c *Config) { c.AutoOpenWeb = v })
+}
+
+// proxyConfig 返回用户配置的代理地址与协议（地址为空表示直连）。
+func proxyConfig() (addr, scheme string) {
+	cfgMu.Lock()
+	defer cfgMu.Unlock()
+	return cfg.Proxy, cfg.ProxyScheme
+}
+
+// setProxyConfig 保存代理地址与探测出的协议。
+func setProxyConfig(addr, scheme string) error {
+	return updateConfig(func(c *Config) {
+		c.Proxy = addr
+		c.ProxyScheme = scheme
+	})
+}
+
+// setProxyScheme 只更新协议（运行时从 SOCKS5 回退到 HTTP 时用）。
+func setProxyScheme(scheme string) error {
+	return updateConfig(func(c *Config) { c.ProxyScheme = scheme })
+}
+
+// syncAutoStartMirror 把注册表里真实的开机自启状态同步一份到 config.json。
+// 注册表始终是权威来源，这里只做副本，不用副本去覆盖用户的手动改动。
+func syncAutoStartMirror() {
+	v := autoStartEnabled()
+	_ = updateConfig(func(c *Config) { c.AutoStart = &v })
 }
 
 // startArgs 根据配置拼出启动 dsh 的参数（抽出来便于单测）。

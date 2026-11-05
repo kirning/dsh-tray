@@ -2,6 +2,7 @@ package tray
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"syscall"
 	"time"
@@ -11,12 +12,21 @@ import (
 
 // runHidden 执行外部命令，隐藏窗口并返回合并后的输出。
 func runHidden(name string, args ...string) (string, error) {
-	return runHiddenTimeout(30*time.Second, name, args...)
+	return runHiddenTimeoutEnv(30*time.Second, nil, name, args...)
 }
 
 // runHiddenTimeout 同上，带超时；超时会强杀进程，避免卡住 UI。
 func runHiddenTimeout(timeout time.Duration, name string, args ...string) (string, error) {
+	return runHiddenTimeoutEnv(timeout, nil, name, args...)
+}
+
+// runHiddenTimeoutEnv 在子进程环境里追加/覆盖若干变量（用于给 npm 设置代理）。
+// env 元素格式是 "KEY=VALUE"；传 nil 表示完全继承当前环境。
+func runHiddenTimeoutEnv(timeout time.Duration, env []string, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: createNoWindow}
 
 	done := make(chan struct{})

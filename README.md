@@ -6,6 +6,8 @@
 - 图标反映三种状态：未运行（灰）/ 启动中（橙，两帧动画）/ 已就绪（绿）
 - 启动完成的判定以 dsh 日志为准（出现 `dsh web: http...`）
 - 菜单最末「版本 x.y.z」可点击，检查并自动更新本程序
+- 「设置」窗口可配代理、查看/复制日志、带进度条地升级本程序
+- 本程序产生的日志统一带 `[dsh-tray]` 前缀，每次启动 dsh 只保留本次内容
 
 ## 菜单
 
@@ -15,19 +17,44 @@
 | 打开web | 默认浏览器打开 `http://127.0.0.1:<port>`，仅"已就绪"可点 |
 | 查看日志 | 用默认文本程序打开 dsh web 日志 |
 | 检查dsh更新 | 查 npm 上有没有更高的 dsh 版本（只查不升） |
-| 开机自启 / 启动后自动打开web | 可勾选配置 |
+| 开机自启 / 启动后自动打开web | 可勾选配置（与「设置」窗口双向同步） |
+| 设置… | 代理配置、启动配置同步、版本+检查更新、只读日志查看 |
 | 退出 | 只结束托盘程序，dsh 继续运行 |
 | 完全退出 | 先关 dsh 服务再退出 |
 | 版本 x.y.z | 点击检查本程序更新 |
 
 双击托盘图标：未运行则启动，已就绪则打开 Web UI。
 
+## 设置窗口
+
+右键 →「设置…」（非模态，不阻塞托盘）：
+
+| 分区 | 内容 |
+|---|---|
+| 代理服务器 | 填 `IP:端口`（或 `IP 端口`、中文冒号、`socks5://` / `http://` 前缀）。点「检测并保存」后**优先做 SOCKS5 握手**，不通则自动回退 HTTP；留空或点「清空」= 直连 |
+| 启动配置 | 「开机自启」「启动后自动打开web」两份勾选，与右键菜单实时同步；`config.json` 里另存一份 `autoStart` 副本 |
+| 版本与更新 | 显示当前版本，旁边「检查更新」按钮；检查→下载→替换→重启的进度走进度条，错误直接显示在状态框（只读、可复制） |
+| 日志 | 只读 TextEdit 显示 `dsh-web.txt`，可选中复制 / 一键复制全部 / 刷新 / 用默认程序打开 |
+
+代理同时用于：GitHub Release 检查与下载（Go 的 `http.Transport`）、`npm view` 查 dsh 版本（注入 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 给子进程）。
+Go 标准库原生支持 `socks5://` 代理 URL，无需额外依赖。运行时若 SOCKS5 突然不可用，会自动改记为 HTTP 并重试。
+
+## 日志规则
+
+- 只有**本程序**写的日志带 `[dsh-tray] 时间戳 ...` 前缀；dsh 自己的 stdout/stderr 原样保留
+- 每次点「启动 / 重启」dsh 时**清空日志**，文件里只有本次启动的内容（托盘程序自身启动/退出不清空）
+- 启动错误（找不到 dsh、僵尸锁清理、进程创建失败、`startup failed` 摘录）、检查 dsh 更新、应用自更新的每一步都写进同一个 `dsh-web.txt`
+
+> ⚠️ 实现坑：Windows 下 Go 的 `O_TRUNC|O_APPEND` 组合会保留 `GENERIC_WRITE`，
+> 写操作按文件指针走而非追加，两个句柄会互相覆盖。所以截断用单独句柄做，
+> 再以**纯 `O_APPEND`** 重新打开给 dsh 子进程继承。
+
 ## 目录结构
 
 ```
 dsh-tray/
 ├── cmd/dsh-tray/          入口（main.go）+ 生成的版本/图标资源 versioninfo.syso
-├── internal/tray/         实现（托盘、状态机、进程控制、图标、配置）
+├── internal/tray/         实现（托盘、状态机、进程控制、图标、配置、设置窗口、代理、日志）
 │   └── assets/            角色序列帧（go:embed 打包进 exe）
 ├── tools/genicon/         由角色帧生成 resources/app.ico
 ├── resources/             app.manifest、app.ico（exe 图标）
@@ -95,9 +122,11 @@ dsh 服务是独立进程，更新托盘不会中断它。旧文件留作 `dsh-t
   后者在 `github.com` 域名下，部分网络（如国内直连）根本不通；前者会 302 到
   `release-assets.githubusercontent.com`，可直连。
 - **不设 `http.Client.Timeout`** —— 它把整个响应体读取算进去，慢网络下必然断在几 MB。
-  改为只限制拨号/TLS/响应头，下载整体上限 15 分钟。
+  改为只限制拨号/TLS/响应头，下载整体上限 30 分钟；断开后用 `Range` **断点续传**，最多 8 轮。
+- 「设置」窗口里的「检查更新」会把下载百分比画到进度条，出错直接显示在状态框并写入日志。
 
-> 若所在网络把 `api.github.com` 也墙了，可设置 `HTTPS_PROXY` 环境变量后重试。
+> 若所在网络把 `api.github.com` 也墙了，在「设置」里填代理地址（SOCKS5 优先，不通自动回退 HTTP），
+> 或设 `HTTPS_PROXY` 环境变量后重试。
 
 ## 找不到 dsh 时
 
@@ -114,10 +143,10 @@ dsh 服务是独立进程，更新托盘不会中断它。旧文件留作 `dsh-t
 
 | 内容 | 位置 |
 |---|---|
-| dsh web 日志 | `%LOCALAPPDATA%\dsh-tray\dsh-web.txt` |
-| 配置（`autoOpenWeb`） | `%LOCALAPPDATA%\dsh-tray\config.json` |
+| dsh web 日志（含本程序日志） | `%LOCALAPPDATA%\dsh-tray\dsh-web.txt` |
+| 配置 | `%LOCALAPPDATA%\dsh-tray\config.json`：`autoOpenWeb` / `proxy` / `proxyScheme` / `autoStart`（副本） |
 | 生成的图标 / 自检报告 | `%LOCALAPPDATA%\dsh-tray\` |
-| 开机自启 | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `DshTray` |
+| 开机自启（权威） | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` → `DshTray` |
 
 ## 自检模式
 
@@ -127,6 +156,7 @@ dsh 服务是独立进程，更新托盘不会中断它。旧文件留作 `dsh-t
 |---|---|
 | `--selftest` | 路径解析、当前 dsh 版本、npm 查更新、运行状态 |
 | `--uitest` | 真实创建托盘与菜单，走一遍三态切换与动画，3 秒后退出 |
+| `--settingstest` | 真实创建「设置」窗口，核对控件、配置联动、进度与状态刷新，3 秒后退出 |
 | `--starttest` | 在 3999 端口起临时实例，验证启动→就绪→停止，不碰 3080 |
 | `--checkupdate` | 查 GitHub release 并**真实下载一次** exe 核对字节数（验证更新链路） |
 

@@ -57,6 +57,7 @@ func uitest() {
 		return
 	}
 	res.WriteString("NewMainWindow OK\r\n")
+	_ = mw.SetLayout(walk.NewHBoxLayout())
 	mw.SetVisible(false)
 
 	ni, err = walk.NewNotifyIcon(mw)

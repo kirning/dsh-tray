@@ -150,7 +150,10 @@ func npmViewVersions(pkg string) (string, error) {
 	if !fileExists(npmCli) {
 		return "", fmt.Errorf("找不到 npm-cli.js: %s", npmCli)
 	}
-	return runHiddenTimeout(40*time.Second, nodeExe, npmCli, "view", pkg, "versions", "--json")
+	// 「设置」里配了代理时，把代理环境变量传给 npm（npm 自己不走 Go 的 http.Client）
+	addr, scheme := proxyConfig()
+	return runHiddenTimeoutEnv(40*time.Second, proxyEnv(addr, scheme),
+		nodeExe, npmCli, "view", pkg, "versions", "--json")
 }
 
 // CheckUpdates 返回当前版本，以及所有高于当前版本的可用版本（已升序去重）。

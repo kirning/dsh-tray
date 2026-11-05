@@ -17,7 +17,7 @@ const pkgName = "@deepseek-ai/dsh"
 
 // appVersion 应用自身版本（与被管理的 dsh 版本无关）。
 // 用 var 而非 const，便于构建时用 -ldflags "-X main.appVersion=x.y.z" 覆盖。
-var appVersion = "1.4.1"
+var appVersion = "1.5.0"
 
 var (
 	dsh *Dsh
@@ -32,6 +32,7 @@ var (
 	actUpdate   *walk.Action
 	actAuto     *walk.Action
 	actAutoOpen *walk.Action
+	actSettings *walk.Action
 	actExit     *walk.Action
 	actExitAll  *walk.Action
 	actVersion  *walk.Action
@@ -117,6 +118,10 @@ func Run(args []string) {
 			checkUpdateReport()
 			return
 		}
+		if a == "--settingstest" {
+			settingstest()
+			return
+		}
 	}
 
 	if !ensureSingleInstance() {
@@ -129,8 +134,9 @@ func Run(args []string) {
 	dir := dataDir()
 	_ = os.MkdirAll(dir, 0o755)
 
-	loadConfig() // 读「启动后自动打开web」等设置
+	loadConfig() // 读「启动后自动打开web」、代理等设置
 
+	trayLogf("程序启动，版本 %s", appVersion)
 	dsh = NewDsh(logFilePath())
 
 	// 首次运行自动登记开机自启；之后尊重用户在菜单里的选择。
@@ -141,6 +147,8 @@ func Run(args []string) {
 	} else if autoStartEnabled() {
 		_ = setAutoStart(true)
 	}
+	// 把注册表里真实的状态同步一份到 config.json（副本，不反过来覆盖注册表）
+	syncAutoStartMirror()
 
 	if err := initIcons(dir); err != nil {
 		return
@@ -154,6 +162,10 @@ func Run(args []string) {
 	if err != nil {
 		return
 	}
+	// 裸 NewMainWindow 没有 Layout。弹出「设置」窗口时主窗口会收到
+	// WM_WINDOWPOSCHANGED + SWP_SHOWWINDOW，walk 会去做布局，
+	// 没有 Layout → ContainerBase.CreateLayoutItem 空指针崩溃。给个空布局即可。
+	_ = mw.SetLayout(walk.NewHBoxLayout())
 	mw.SetVisible(false)
 	mw.SetTitle(appName)
 
@@ -231,6 +243,9 @@ func buildMenu(menu *walk.Menu) error {
 	actAutoOpen.SetCheckable(true)
 	actAutoOpen.SetChecked(autoOpenWeb())
 	menu.Actions().Add(actAutoOpen)
+
+	actSettings = newAction("设置…", func() { doOpenSettings() })
+	menu.Actions().Add(actSettings)
 
 	menu.Actions().Add(walk.NewSeparatorAction())
 
@@ -424,10 +439,18 @@ func doViewLog() {
 	p := logFilePath()
 	if _, err := os.Stat(p); err != nil {
 		_ = os.MkdirAll(filepath.Dir(p), 0o755)
-		_ = os.WriteFile(p, []byte("(还没有日志 —— dsh web 尚未通过本程序启动过)\r\n"), 0o644)
+		_ = os.WriteFile(p, []byte(formatTrayLog("还没有日志 —— dsh web 尚未通过本程序启动过", time.Now())), 0o644)
 	}
 	if err := shellOpen(p); err != nil {
 		showError("打开文件失败", err)
+	}
+}
+
+// doOpenSettings 打开设置窗口（非模态，主消息循环继续跑，后台更新才能刷新进度）。
+func doOpenSettings() {
+	if err := openSettings(mw); err != nil {
+		trayLogf("打开设置窗口失败：%v", err)
+		showError("打开设置失败", err)
 	}
 }
 
@@ -452,7 +475,13 @@ func doCheckUpdate() {
 			}
 		})
 
+		trayLogf("检查dsh更新：开始")
 		current, newer, err := CheckUpdates(pkgName)
+		if err != nil {
+			trayLogf("检查dsh更新失败：%v", err)
+		} else {
+			trayLogf("检查dsh更新完成：当前 %s，更高版本 %d 个", current, len(newer))
+		}
 
 		var msg string
 		switch {
@@ -536,17 +565,15 @@ func doCheckAppUpdate() {
 			return
 		}
 
-		msgBox(appName+" - 更新完成",
+		// 必须等用户点确定再重启 —— msgBox 是异步投递，直接用会立刻把窗口关掉
+		showMsgBoxAndWait(appName+" - 更新完成",
 			fmt.Sprintf("已更新到 %s。\r\n\r\n点击「确定」后自动重启本程序。\r\ndsh 服务会继续运行。", tag),
 			walk.MsgBoxIconInformation)
 
+		trayLogf("应用已更新到 %s，准备重启", tag)
 		syncUI(func() {
 			restartSelf()
-			if ni != nil {
-				_ = ni.SetVisible(false)
-				ni.Dispose()
-			}
-			os.Exit(0)
+			quitApp()
 		})
 	}()
 }
@@ -574,8 +601,10 @@ func restartSelf() {
 func reportStartFailure() {
 	msg := lastStartupFailure(logFilePath())
 	if msg == "" {
+		trayLogf("启动失败：dsh 进程已退出，但日志里没有明确的 startup failed 原因")
 		return
 	}
+	trayLogf("启动失败原因（摘自日志）：\n%s", msg)
 	syncUI(func() {
 		walk.MsgBox(mw, appName+" - 启动失败", msg+"\r\n\r\n完整日志：菜单 → 查看日志", walk.MsgBoxIconError)
 	})
@@ -586,9 +615,9 @@ func doToggleAutoStart() {
 	if err := setAutoStart(want); err != nil {
 		showError("设置开机自启失败", err)
 	}
-	if actAuto != nil {
-		actAuto.SetChecked(autoStartEnabled())
-	}
+	syncAutoStartMirror() // 同步一份到 config.json
+	trayLogf("菜单：开机自启 = %v", want)
+	syncSettingsToggles()
 }
 
 // doToggleAutoOpenWeb 切换"启动后自动打开web"（即是否给 dsh 传 --no-open）。
@@ -597,9 +626,8 @@ func doToggleAutoOpenWeb() {
 	if err := setAutoOpenWeb(want); err != nil {
 		showError("保存配置失败", err)
 	}
-	if actAutoOpen != nil {
-		actAutoOpen.SetChecked(autoOpenWeb())
-	}
+	trayLogf("菜单：启动后自动打开web = %v（启动参数 %v）", want, startArgs())
+	syncSettingsToggles()
 }
 
 // isDoubleClick 判断"本次点击"是否构成双击（prev 为上一次左键抬起时间）。
@@ -620,11 +648,13 @@ func doTrayDoubleClick() {
 
 // doExit 只退出托盘程序，不动 dsh 服务（dsh 继续在后台提供 web）。
 func doExit() {
+	trayLogf("退出（dsh 服务保持运行）")
 	quitApp()
 }
 
 // doExitAll 先关闭 dsh 服务，再退出托盘程序。
 func doExitAll() {
+	trayLogf("完全退出（同时关闭 dsh 服务）")
 	go func() {
 		dsh.Shutdown()
 		syncUI(quitApp)
@@ -642,6 +672,7 @@ func quitApp() {
 
 func showError(title string, err error) {
 	msg := err.Error()
+	trayLogf("%s：%s", title, msg)
 	syncUI(func() {
 		walk.MsgBox(mw, appName+" - "+title, msg, walk.MsgBoxIconError)
 	})
