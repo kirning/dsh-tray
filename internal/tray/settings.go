@@ -63,14 +63,17 @@ func openSettings(owner walk.Form) error {
 	err := (decl.Dialog{
 		AssignTo: &dlg,
 		Title:    "设置 - " + appName,
-		Size:     decl.Size{Width: 760, Height: 700},
-		MinSize:  decl.Size{Width: 700, Height: 560},
-		Layout:   decl.VBox{Margins: decl.Margins{Left: 12, Top: 12, Right: 12, Bottom: 12}, Spacing: 8},
+		Size:     decl.Size{Width: 780, Height: 720},
+		MinSize:  decl.Size{Width: 720, Height: 600},
+		Layout:   decl.VBox{Margins: decl.Margins{Left: 14, Top: 12, Right: 14, Bottom: 12}, Spacing: 10},
 		Children: []decl.Widget{
 			decl.GroupBox{
 				Title:  "代理服务器",
-				Layout: decl.VBox{Spacing: 5},
+				Layout: decl.VBox{Spacing: 6},
 				Children: []decl.Widget{
+					// 每行的收尾都放一个 HSpacer：它既把控件顶到左边、保持各行左边界一致，
+					// 又让分组框带上 GrowableHorz —— 不然这个分组会被 walk 按偏好宽度居中，
+					// 比其它分组窄一圈（BoxLayout 只铺满可横向拉伸的子项）。
 					decl.Composite{
 						Layout: decl.HBox{Spacing: 6},
 						Children: []decl.Widget{
@@ -81,18 +84,21 @@ func openSettings(owner walk.Form) error {
 								MinSize:  decl.Size{Width: 220, Height: 22},
 							},
 							decl.PushButton{
-								AssignTo: &s.btnProxy,
-								Text:     "检测并保存",
+								AssignTo:  &s.btnProxy,
+								Text:      "检测并保存",
+								MaxSize:   decl.Size{Width: 100},
 								OnClicked: func() {
 									saveProxyFromSettings()
 								},
 							},
 							decl.PushButton{
-								Text: "清空（直连）",
+								Text:    "清空（直连）",
+								MaxSize: decl.Size{Width: 100},
 								OnClicked: func() {
 									clearProxyFromSettings()
 								},
 							},
+							decl.HSpacer{},
 						},
 					},
 					decl.Label{AssignTo: &s.proxyStatus, Text: proxyNote},
@@ -102,22 +108,28 @@ func openSettings(owner walk.Form) error {
 
 			decl.GroupBox{
 				Title:  "启动配置（与右键菜单同步，config.json 另存一份副本）",
-				Layout: decl.VBox{Spacing: 4},
+				Layout: decl.VBox{Spacing: 6},
 				Children: []decl.Widget{
-					decl.CheckBox{
-						Text:     "开机自启",
-						AssignTo: &s.chkAuto,
-						Checked:  autoStartEnabled(),
-						OnClicked: func() {
-							applyAutoStartFromSettings()
-						},
-					},
-					decl.CheckBox{
-						Text:     "启动后自动打开web",
-						AssignTo: &s.chkAutoOpen,
-						Checked:  autoOpenWeb(),
-						OnClicked: func() {
-							applyAutoOpenFromSettings()
+					decl.Composite{
+						Layout: decl.HBox{Spacing: 18},
+						Children: []decl.Widget{
+							decl.CheckBox{
+								Text:     "开机自启",
+								AssignTo: &s.chkAuto,
+								Checked:  autoStartEnabled(),
+								OnClicked: func() {
+									applyAutoStartFromSettings()
+								},
+							},
+							decl.CheckBox{
+								Text:     "启动后自动打开web",
+								AssignTo: &s.chkAutoOpen,
+								Checked:  autoOpenWeb(),
+								OnClicked: func() {
+									applyAutoOpenFromSettings()
+								},
+							},
+							decl.HSpacer{},
 						},
 					},
 				},
@@ -125,19 +137,21 @@ func openSettings(owner walk.Form) error {
 
 			decl.GroupBox{
 				Title:  "版本与更新",
-				Layout: decl.VBox{Spacing: 5},
+				Layout: decl.VBox{Spacing: 6},
 				Children: []decl.Widget{
 					decl.Composite{
 						Layout: decl.HBox{Spacing: 8},
 						Children: []decl.Widget{
 							decl.Label{AssignTo: &s.versionLabel, Text: "当前版本：" + appVersion},
 							decl.PushButton{
-								AssignTo: &s.btnUpdate,
-								Text:     "检查更新",
+								AssignTo:  &s.btnUpdate,
+								Text:      "检查更新",
+								MaxSize:   decl.Size{Width: 100},
 								OnClicked: func() {
 									settingsCheckUpdate()
 								},
 							},
+							decl.HSpacer{},
 						},
 					},
 					decl.ProgressBar{
@@ -145,13 +159,13 @@ func openSettings(owner walk.Form) error {
 						MinValue: 0,
 						MaxValue: 1000,
 						Value:    0,
-						MinSize:  decl.Size{Width: 660, Height: 18},
+						MinSize:  decl.Size{Height: 18},
 					},
 					decl.TextEdit{
 						AssignTo: &s.statusEdit,
 						ReadOnly: true,
 						VScroll:  true,
-						MinSize:  decl.Size{Width: 660, Height: 52},
+						MinSize:  decl.Size{Height: 54},
 						Text:     "就绪。点击「检查更新」检查并升级本程序。",
 					},
 				},
@@ -159,15 +173,16 @@ func openSettings(owner walk.Form) error {
 
 			decl.GroupBox{
 				Title:         "日志（只读，可选中复制）",
-				Layout:        decl.VBox{Spacing: 5},
+				Layout:        decl.VBox{Spacing: 6},
 				StretchFactor: 1,
 				Children: []decl.Widget{
 					decl.Composite{
 						Layout: decl.HBox{Spacing: 6},
 						Children: []decl.Widget{
-							decl.PushButton{Text: "刷新", OnClicked: func() { refreshLogView() }},
-							decl.PushButton{Text: "复制全部", OnClicked: func() { copyLogView() }},
-							decl.PushButton{Text: "用默认程序打开", OnClicked: func() { doViewLog() }},
+							decl.PushButton{Text: "刷新", MaxSize: decl.Size{Width: 80}, OnClicked: func() { refreshLogView() }},
+							decl.PushButton{Text: "复制全部", MaxSize: decl.Size{Width: 96}, OnClicked: func() { copyLogView() }},
+							decl.PushButton{Text: "用默认程序打开", MaxSize: decl.Size{Width: 120}, OnClicked: func() { doViewLog() }},
+							decl.HSpacer{},
 						},
 					},
 					decl.TextEdit{
@@ -176,7 +191,7 @@ func openSettings(owner walk.Form) error {
 						VScroll:       true,
 						HScroll:       true,
 						Text:          readLogText(),
-						MinSize:       decl.Size{Width: 660, Height: 180},
+						MinSize:       decl.Size{Height: 180},
 						StretchFactor: 2,
 					},
 				},
@@ -185,7 +200,8 @@ func openSettings(owner walk.Form) error {
 			decl.Composite{
 				Layout: decl.HBox{Spacing: 6},
 				Children: []decl.Widget{
-					decl.PushButton{Text: "关闭", OnClicked: func() { dlg.Close(0) }},
+					decl.HSpacer{},
+					decl.PushButton{Text: "关闭", MaxSize: decl.Size{Width: 100}, OnClicked: func() { dlg.Close(0) }},
 				},
 			},
 		},
@@ -203,6 +219,9 @@ func openSettings(owner walk.Form) error {
 		settingsMu.Lock()
 		settingsPane = nil
 		settingsMu.Unlock()
+		// walk 在 WM_CLOSE 里会给 owner（隐藏的 mw）发 SWP_SHOWWINDOW，
+		// 不藏回去就会留下一个空白窗体（详见 guardMainWindow）。
+		hideMainWindow()
 		trayLogf("设置窗口已关闭")
 	})
 
@@ -391,6 +410,12 @@ func settingsCheckUpdate() {
 	}
 	setSettingsStatus("正在检查更新…")
 
+	// 确认框要挂在设置窗口上。挂到隐藏的 mw 上会跑到设置窗口背后、位置也奇怪。
+	var owner walk.Form = mw
+	if s.dlg != nil {
+		owner = s.dlg
+	}
+
 	go func() {
 		defer syncUI(func() {
 			if f := currentSettings(); f != nil && f.btnUpdate != nil {
@@ -404,11 +429,12 @@ func settingsCheckUpdate() {
 			return
 		}
 		if !newer {
-			setSettingsStatus("已是最新版本 " + tag)
+			// 本地版本可能比线上还新（刚打完包、Release 还没发出来），别只说"最新"
+			setSettingsStatus(fmt.Sprintf("没有可用的新版本（当前 %s，GitHub 上最新 %s）", appVersion, tag))
 			setSettingsProgress(1000, 1000)
 			return
 		}
-		if !askYesNo(appName+" - 发现新版本",
+		if !askYesNoFrom(owner, appName+" - 发现新版本",
 			fmt.Sprintf("当前版本：%s\r\n最新版本：%s\r\n\r\n是否下载并更新？\r\n\r\n更新过程：下载 → 替换本程序 → 自动重启。dsh 服务不会中断。",
 				appVersion, tag)) {
 			setSettingsStatus("已取消更新")

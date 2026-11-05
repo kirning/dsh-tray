@@ -17,7 +17,7 @@ const pkgName = "@deepseek-ai/dsh"
 
 // appVersion 应用自身版本（与被管理的 dsh 版本无关）。
 // 用 var 而非 const，便于构建时用 -ldflags "-X main.appVersion=x.y.z" 覆盖。
-var appVersion = "1.5.0"
+var appVersion = "1.5.1"
 
 var (
 	dsh *Dsh
@@ -122,6 +122,10 @@ func Run(args []string) {
 			settingstest()
 			return
 		}
+		if a == "--shot" {
+			settingsShot()
+			return
+		}
 	}
 
 	if !ensureSingleInstance() {
@@ -168,6 +172,7 @@ func Run(args []string) {
 	_ = mw.SetLayout(walk.NewHBoxLayout())
 	mw.SetVisible(false)
 	mw.SetTitle(appName)
+	guardMainWindow()
 
 	ni, err = walk.NewNotifyIcon(mw)
 	if err != nil {
@@ -271,7 +276,13 @@ func monitor() {
 	defer ticker.Stop()
 	for range ticker.C {
 		s := currentState()
-		syncUI(func() { updateState(s) })
+		syncUI(func() {
+			// 兜底：宿主窗口任何时候都不该露出来（见 guardMainWindow）
+			if mw != nil && mw.Visible() {
+				mw.SetVisible(false)
+			}
+			updateState(s)
+		})
 	}
 }
 
@@ -294,6 +305,42 @@ func syncUI(f func()) {
 	}
 	defer func() { _ = recover() }()
 	mw.Synchronize(f)
+}
+
+// guardMainWindow 把「设置」窗口的宿主窗口保护起来：永远不显示、永远关不掉。
+//
+// 坑：walk 的 FormBase.WndProc 处理 WM_CLOSE 时会给 owner 发
+// SetWindowPos(owner, HWND_NOTOPMOST, 0,0,0,0, SWP_NOMOVE|SWP_NOSIZE|SWP_SHOWWINDOW)
+// —— 本意是"模态子窗口关掉后把父窗口放出来"。可我们的设置窗口是非模态的，
+// owner 就是这个纯宿主用的隐藏窗口 mw，于是关掉设置后会多出一个空白窗体；
+// 用户再关掉它，mw.Run() 返回，整个托盘程序（含图标）直接消失。
+//
+// 两个动作各管一头：
+//   - Closing 里把 canceled 置 true，防止 mw 被真正销毁导致消息循环退出；
+//   - hideMainWindow 在子窗口关闭后把它再藏回去。
+func guardMainWindow() {
+	if mw == nil {
+		return
+	}
+	mw.Closing().Attach(func(canceled *bool, reason walk.CloseReason) {
+		*canceled = true
+		mw.SetVisible(false)
+	})
+}
+
+// hideMainWindow 重新藏起宿主窗口。
+// 必须用 Synchronize（PostMessage）延后执行：调用点还在 WM_CLOSE 的处理函数里，
+// walk 是在 publisher 返回之后才 ShowWindow 的，同步隐藏会被它立刻覆盖。
+func hideMainWindow() {
+	if mw == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	mw.Synchronize(func() {
+		if mw != nil {
+			mw.SetVisible(false)
+		}
+	})
 }
 
 func updateState(s runState) {
@@ -517,13 +564,18 @@ func msgBox(title, text string, style walk.MsgBoxStyle) {
 	})
 }
 
-// askYesNo 在 UI 线程弹确认框并等待结果。
+// askYesNo 在 UI 线程弹确认框并等待结果（owner 为隐藏主窗口）。
 // 注意：walk 的 Synchronize 用 PostMessage 异步投递（不会阻塞等待），
 // 所以必须靠 channel 把结果回传给后台 goroutine。
 func askYesNo(title, text string) bool {
+	return askYesNoFrom(mw, title, text)
+}
+
+// askYesNoFrom 同 askYesNo，但可指定 owner（设置窗口里弹框要用设置窗口当 owner）。
+func askYesNoFrom(owner walk.Form, title, text string) bool {
 	ch := make(chan bool, 1)
 	syncUI(func() {
-		r := walk.MsgBox(mw, title, text, walk.MsgBoxYesNo|walk.MsgBoxIconQuestion)
+		r := walk.MsgBox(owner, title, text, walk.MsgBoxYesNo|walk.MsgBoxIconQuestion)
 		ch <- r == walk.DlgCmdYes
 	})
 	return <-ch

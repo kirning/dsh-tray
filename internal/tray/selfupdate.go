@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -91,7 +92,76 @@ func doWithTimeout(req *http.Request, d time.Duration) (*http.Response, error) {
 	return resp2, nil
 }
 
-// latestRelease 查 GitHub 最新 release。
+// ---------- 出网链路（代理 / 直连）----------
+
+// proxyRoute 是一条可尝试的出网链路。
+type proxyRoute struct {
+	label  string // 给日志和报错用
+	addr   string // "" = 直连
+	scheme string
+}
+
+// proxyRoutes 返回本次请求要依次尝试的链路。
+//
+// 为什么配了代理还要试直连：GitHub API 的匿名配额（60 次/小时）是按**出口 IP**
+// 算的。代理出口常被一堆人共用，于是「代理能连上、握手也成功，但 GitHub 回
+// HTTP 403 rate limit exceeded」——而本机直连反而还有额度（实测直连 200）。
+// 反过来若直连被墙，代理就派上用场。所以两条都备着，谁通用谁。
+func proxyRoutes() []proxyRoute {
+	addr, scheme := proxyConfig()
+	if addr == "" {
+		return []proxyRoute{{label: "直连"}}
+	}
+	routes := []proxyRoute{{label: strings.ToUpper(scheme) + " 代理 " + addr, addr: addr, scheme: scheme}}
+	if scheme != "http" {
+		// 同一个端口先按配的协议试，不行再按 HTTP 代理试（很多客户端两种都收）
+		routes = append(routes, proxyRoute{label: "HTTP 代理 " + addr, addr: addr, scheme: "http"})
+	}
+	return append(routes, proxyRoute{label: "直连"})
+}
+
+// doRoute 用指定链路发一次请求。req 会被 Clone，可以重复用。
+func doRoute(req *http.Request, d time.Duration, rt proxyRoute) (*http.Response, error) {
+	return doWithTimeoutClient(req.Clone(req.Context()), d, clientForProxy(rt.addr, rt.scheme))
+}
+
+// apiProblem 把非 2xx 响应翻成一句人话。
+// GitHub 限流时 body 是 {"message":"API rate limit exceeded for ..."}，
+// 头部还有 X-RateLimit-Remaining / Reset，一起带上，用户才知道该等还是该换链路。
+func apiProblem(resp *http.Response, body []byte) string {
+	var e struct {
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(body, &e)
+	msg := strings.TrimSpace(e.Message)
+	if msg == "" {
+		msg = strings.TrimSpace(string(body))
+	}
+	if r := []rune(msg); len(r) > 200 {
+		msg = string(r[:200]) + "…"
+	}
+	s := fmt.Sprintf("HTTP %d", resp.StatusCode)
+	if msg != "" {
+		s += "：" + msg
+	}
+	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusTooManyRequests {
+		if resp.Header.Get("X-RateLimit-Remaining") == "0" {
+			s += fmt.Sprintf("（匿名配额已用尽 %s/%s",
+				resp.Header.Get("X-RateLimit-Remaining"), resp.Header.Get("X-RateLimit-Limit"))
+			if reset := resp.Header.Get("X-RateLimit-Reset"); reset != "" {
+				if sec, err := strconv.ParseInt(reset, 10, 64); err == nil {
+					if left := time.Until(time.Unix(sec, 0)); left > 0 {
+						s += "，约 " + left.Round(time.Minute).String() + "后恢复"
+					}
+				}
+			}
+			s += "）"
+		}
+	}
+	return s
+}
+
+// latestRelease 查 GitHub 最新 release，按 proxyRoutes 依次尝试。
 func latestRelease() (releaseInfo, error) {
 	var rel releaseInfo
 	autoFallbackProxy()
@@ -103,23 +173,36 @@ func latestRelease() (releaseInfo, error) {
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "dsh-tray/"+appVersion)
 
-	resp, err := doWithTimeout(req, metaTimeout)
-	if err != nil {
-		return rel, fmt.Errorf("访问 GitHub 失败：%v\r\n\r\n可在「设置」里配置代理后重试。", err)
+	var problems []string
+	for _, rt := range proxyRoutes() {
+		resp, rerr := doRoute(req, metaTimeout, rt)
+		if rerr != nil {
+			problems = append(problems, rt.label+" → "+rerr.Error())
+			trayLogf("查询 release 失败（%s）：%v", rt.label, rerr)
+			continue
+		}
+		if resp.StatusCode == http.StatusOK {
+			derr := json.NewDecoder(resp.Body).Decode(&rel)
+			resp.Body.Close()
+			if derr != nil {
+				problems = append(problems, rt.label+" → 响应解析失败："+derr.Error())
+				continue
+			}
+			trayLogf("查询 release 成功（%s，版本 %s）", rt.label, rel.Tag)
+			return rel, nil
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusNotFound {
+			return rel, fmt.Errorf("仓库 %s 还没有发布任何 release。", updateRepo)
+		}
+		problem := apiProblem(resp, body)
+		problems = append(problems, rt.label+" → "+problem)
+		trayLogf("查询 release 失败（%s）：%s", rt.label, problem)
 	}
-	defer resp.Body.Close()
-
-	switch resp.StatusCode {
-	case http.StatusOK:
-	case http.StatusNotFound:
-		return rel, fmt.Errorf("仓库 %s 还没有发布任何 release。", updateRepo)
-	default:
-		return rel, fmt.Errorf("GitHub 返回 HTTP %d", resp.StatusCode)
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return rel, fmt.Errorf("解析 GitHub 响应失败：%v", err)
-	}
-	return rel, nil
+	return rel, fmt.Errorf("访问 GitHub 失败（已依次尝试 %d 条链路）：\r\n%s\r\n\r\n"+
+		"提示：GitHub 匿名接口有速率限制，代理出口 IP 常被用光；可在「设置」里清空代理走直连，或稍后重试。",
+		len(problems), strings.Join(problems, "\r\n"))
 }
 
 // findExeAsset 在 release 里挑出 Windows 可执行文件。
@@ -186,6 +269,38 @@ func (p *progressReader) Read(b []byte) (int, error) {
 	return n, err
 }
 
+// openAsset 请求资产地址，按 proxyRoutes 依次尝试，返回 200/206 的响应。
+// 第 i 轮续传要知道 shouldRetry 之外的信息，所以顺手把用的链路 label 也带出来。
+func openAsset(url string, have int64) (*http.Response, string, error) {
+	var problems []string
+	for _, rt := range proxyRoutes() {
+		req, err := http.NewRequest(http.MethodGet, url, nil)
+		if err != nil {
+			return nil, "", err
+		}
+		// API 资产端点必须带这个 Accept 才会返回二进制流而不是 JSON
+		req.Header.Set("Accept", "application/octet-stream")
+		req.Header.Set("User-Agent", "dsh-tray/"+appVersion)
+		if have > 0 {
+			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
+		}
+
+		resp, rerr := doRoute(req, downloadTimeout, rt)
+		if rerr != nil {
+			problems = append(problems, rt.label+" → "+rerr.Error())
+			continue
+		}
+		if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusPartialContent {
+			return resp, rt.label, nil
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		resp.Body.Close()
+		problems = append(problems, rt.label+" → "+apiProblem(resp, body))
+		trayLogf("下载资产失败（%s）：%s", rt.label, apiProblem(resp, body))
+	}
+	return nil, "", fmt.Errorf("%s", strings.Join(problems, "\r\n"))
+}
+
 // downloadAsset 把资产下载到 dst，支持断点续传与多轮重试。
 //
 // 慢网络实测（约 9 KB/s 时 9 MB 要十几分钟）单次请求必然被时长上限掐断，
@@ -200,38 +315,17 @@ func downloadAsset(dst, url string, expectSize int64, onProgress ...func(done, t
 		cb = onProgress[0]
 	}
 
+	var lastErr error
 	for i := 0; i < attempts; i++ {
 		have := fileSize(dst)
 		if expectSize > 0 && have == expectSize {
 			return nil
 		}
 
-		req, err := http.NewRequest(http.MethodGet, url, nil)
+		resp, route, err := openAsset(url, have)
 		if err != nil {
-			return err
-		}
-		// API 资产端点必须带这个 Accept 才会返回二进制流而不是 JSON
-		req.Header.Set("Accept", "application/octet-stream")
-		req.Header.Set("User-Agent", "dsh-tray/"+appVersion)
-		if have > 0 {
-			req.Header.Set("Range", fmt.Sprintf("bytes=%d-", have))
-		}
-
-		resp, err := doWithTimeout(req, downloadTimeout)
-		if err != nil {
+			lastErr = fmt.Errorf("下载失败：%v", err)
 			trayLogf("更新下载第 %d 轮失败：%v（已有 %d 字节）", i+1, err, have)
-			if i == attempts-1 {
-				return fmt.Errorf("下载失败：%v\r\n\r\n可在「设置」里配置代理后重试。", err)
-			}
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-			resp.Body.Close()
-			trayLogf("更新下载第 %d 轮返回 HTTP %d", i+1, resp.StatusCode)
-			if i == attempts-1 {
-				return fmt.Errorf("下载失败：HTTP %d", resp.StatusCode)
-			}
 			continue
 		}
 
@@ -247,6 +341,12 @@ func downloadAsset(dst, url string, expectSize int64, onProgress ...func(done, t
 			resp.Body.Close()
 			return fmt.Errorf("无法写入新版本（目录可能没有写权限）：%v", ferr)
 		}
+		if have == 0 {
+			trayLogf("更新下载第 %d 轮开始，链路=%s", i+1, route)
+		} else {
+			trayLogf("更新下载第 %d 轮续传，链路=%s，已有 %d 字节", i+1, route, have)
+		}
+
 		pr := &progressReader{r: resp.Body, base: base, total: expectSize, cb: cb}
 		_, cerr := io.Copy(f, pr)
 		closeErr := f.Close()
@@ -259,12 +359,17 @@ func downloadAsset(dst, url string, expectSize int64, onProgress ...func(done, t
 			break // 这一轮完整结束
 		}
 		// 中断：已写入的部分留在文件里，下一轮用 Range 接着下
+		lastErr = cerr
 		trayLogf("更新下载第 %d 轮中断，已保存 %d 字节，准备续传", i+1, fileSize(dst))
 	}
 
 	if expectSize > 0 {
 		if got := fileSize(dst); got != expectSize {
-			return fmt.Errorf("下载不完整（%d/%d 字节），请检查网络后重试", got, expectSize)
+			msg := fmt.Sprintf("下载不完整（%d/%d 字节），请检查网络后重试", got, expectSize)
+			if lastErr != nil {
+				msg += "\r\n最后一次错误：" + lastErr.Error()
+			}
+			return fmt.Errorf("%s", msg)
 		}
 	}
 	return nil
@@ -322,6 +427,7 @@ func cleanupOldBinary() {
 // checkUpdateReport 是隐藏自检：查一次 GitHub 更新并把结果写到 updatecheck.txt。
 // 会顺带把 release 里的 exe 真下载一遍（保留部分文件，能验证断点续传）。
 func checkUpdateReport() {
+	loadConfig() // 自检也要按真实配置走代理，否则测不到代理链路
 	out := &strings.Builder{}
 	fmt.Fprintf(out, "local   = %s\r\n", appVersion)
 	fmt.Fprintf(out, "api     = %s\r\n", releaseAPI)
