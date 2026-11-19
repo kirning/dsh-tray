@@ -24,8 +24,12 @@ Windows 通知区常驻小工具，用右键菜单管 `dsh web` 的启停、重�
 | 运行时数据 | `%LOCALAPPDATA%\dsh-tray\` |
 | 当前版本 | **1.7.0** |
 
-⚠️ **本机直连 `github.com:443` 不通**（20 秒超时）。`git push` / 克隆走仓库 `.git/config` 里已配好的 SOCKS 代理
-`ALL_PROXY=socks5://127.0.0.1:10808`；`github.com:22` 通但本机没有 SSH key，只能走 HTTPS。
+⚠️ **推 GitHub 前先确认代理还在不在**。仓库 `.git/config` 写死了
+`http.proxy` / `https.proxy = socks5://127.0.0.1:10808`（历史上本机直连 `github.com:443` 不通才加的）。
+**2026-11-19 实测直连已可用**（curl 返回 200、`git push` 成功），且当天 10808 端口并未监听。
+代理没开时 `git push` 会报 `Failed to connect to github.com:443 over proxy 127.0.0.1`，
+绕过办法：`git -c http.proxy= -c https.proxy= push origin main`。
+`github.com:22` 通但本机**没有 SSH key**，只能走 HTTPS。
 
 ---
 
