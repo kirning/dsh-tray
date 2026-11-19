@@ -99,13 +99,13 @@ func (t *Tray) Start() {
 	menu.AddSeparator()
 
 	t.actExit = menu.Add("退出（dsh 继续运行）")
-	t.actExit.OnClick(func(*application.Context) { t.app.Quit() })
+	t.actExit.OnClick(func(*application.Context) { Quit() })
 
 	t.actExitAll = menu.Add("完全退出（同时关闭 dsh）")
 	t.actExitAll.OnClick(func(*application.Context) {
 		go func() {
 			_ = t.dsh.Stop()
-			t.app.Quit()
+			Quit()
 		}()
 	})
 

@@ -16,7 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"sync/atomic"
+	"time"
 
 	"github.com/kirning/dsh-tray/internal/app"
 	"github.com/kirning/dsh-tray/internal/core"
@@ -27,15 +27,16 @@ import (
 //go:embed all:frontend/dist
 var assets embed.FS
 
-// quitting 只有用户明确点“退出”/“完全退出”时才置 true，
-// 否则关掉设置窗口不应该结束整个托盘程序。
-var quitting atomic.Bool
-
 func main() {
+	quitTest := false
 	for _, a := range os.Args[1:] {
-		if a == "--version" || a == "-v" {
+		switch a {
+		case "--version", "-v":
 			fmt.Println(core.AppVersion)
 			return
+		case "--quittest":
+			// 自检：启动后 3 秒主动退出，用来验证退出链路（托盘菜单无法自动化点击）
+			quitTest = true
 		}
 	}
 
@@ -69,10 +70,11 @@ func main() {
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: false,
 		},
-		// 关掉设置窗口不能退出程序：托盘还要继续常驻
-		ShouldQuit: func() bool { return quitting.Load() },
+		// 关掉设置窗口不能退出程序；只有显式 Quit() 置位后才允许真正退出
+		ShouldQuit: app.ShouldQuit,
 	})
 
+	app.SetQuitter(wailsApp.Quit)
 	app.SetEmitter(svc, func(name string, data any) {
 		wailsApp.Event.Emit(name, data)
 	})
@@ -86,8 +88,7 @@ func main() {
 		cmd := exec.Command(exe)
 		cmd.Dir = filepath.Dir(exe)
 		_ = cmd.Start()
-		quitting.Store(true)
-		wailsApp.Quit()
+		app.Quit()
 	})
 
 	wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
@@ -103,6 +104,14 @@ func main() {
 	})
 
 	app.NewTray(wailsApp, dsh, svc).Start()
+
+	if quitTest {
+		go func() {
+			time.Sleep(3 * time.Second)
+			core.Logf("--quittest：主动退出（验证退出链路）")
+			app.Quit()
+		}()
+	}
 
 	if err := wailsApp.Run(); err != nil {
 		core.Logf("运行失败：%v", err)
