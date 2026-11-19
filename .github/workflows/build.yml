@@ -7,6 +7,16 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "发布版本号（如 2.1.0）。留空只构建、不发 Release"
+        required: false
+        type: string
+      draft:
+        description: "创建为草稿 Release（不更新 latest，适合先验证）"
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -27,11 +37,37 @@ jobs:
             cgo: "1"
     runs-on: ${{ matrix.os }}
     env:
-      # Linux 侧 Wails 要用 cgo 链接 GTK/WebKit，CGO_ENABLED=0 会报
-      # undefined requires_CGO_ENABLED_1_or_build_tag_purego；Windows 用纯 Go 后端即可。
+      # Linux 侧 Wails 要用 cgo 链接 GTK4/WebKitGTK；CGO_ENABLED=0 会报
+      # undefined requires_CGO_ENABLED_1_or_build_tag_purego
       CGO_ENABLED: ${{ matrix.cgo }}
     steps:
       - uses: actions/checkout@v4
+
+      # 版本来源：推 vX.Y.Z 标签 → 用标签；手动触发且填了 version → 用输入值。
+      # 必须写进源码，否则 Release 里的包和程序自报版本会不一致，自更新会反复提示。
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          V=""
+          if [ "${{ github.event_name }}" = "push" ] && [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            V="${{ github.ref_name }}"
+            V="${V#v}"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            V="${{ inputs.version }}"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "resolved version: [$V]"
+
+      - name: Sync version into source
+        if: steps.ver.outputs.version != ''
+        shell: bash
+        run: |
+          V="${{ steps.ver.outputs.version }}"
+          sed -i "s/^var AppVersion = .*/var AppVersion = \"$V\"/" internal/core/selfupdate.go
+          sed -i 's/^  version: "[^"]*"/  version: "'"$V"'"/' build/config.yml
+          grep -n "var AppVersion = " internal/core/selfupdate.go
+          grep -n '^  version:' build/config.yml
 
       - uses: actions/setup-go@v5
         with:
@@ -84,8 +120,11 @@ jobs:
           path: ${{ matrix.asset }}
           if-no-files-found: error
 
+  # 发布：推 v* 标签 → 正式 Release；手动触发且填了版本 → Release（默认草稿）
   release:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.version != '')
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -93,11 +132,26 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+          # 只取两个平台产物，别把日志 artifact 也混进来
+          pattern: dsh-tray*
+
+      - name: Generate checksums
+        run: |
+          cd dist
+          ls -la
+          sha256sum dsh-tray.exe dsh-tray-linux-amd64 > checksums.txt
+          cat checksums.txt
 
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event_name == 'push' && github.ref_name || format('v{0}', inputs.version) }}
+          name: ${{ github.event_name == 'push' && github.ref_name || format('v{0}', inputs.version) }}
+          # 手动触发默认草稿：先人工验证产物，再在网页上点 Publish
+          draft: ${{ github.event_name == 'workflow_dispatch' && inputs.draft || false }}
+          prerelease: false
+          generate_release_notes: ${{ github.event_name == 'push' }}
           files: |
             dist/dsh-tray.exe
             dist/dsh-tray-linux-amd64
-          generate_release_notes: true
+            dist/checksums.txt
           fail_on_unmatched_files: true
