@@ -1,0 +1,44 @@
+:root {
+  color-scheme: light;
+  font-family: "Inter", "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #faf9f6;
+  color: #1f1e1c;
+  overflow-y: auto;
+}
+
+#root {
+  padding: 18px 20px 28px;
+}
+
+.section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.hint {
+  color: #6b6a66;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.log-box textarea {
+  font-family: "Cascadia Mono", "Consolas", "Menlo", monospace !important;
+  font-size: 12px !important;
+  line-height: 1.5 !important;
+}

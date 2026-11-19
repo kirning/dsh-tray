@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=dsh tray
+Comment=dsh web tray manager
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/dsh-tray-wails.exe %u
+Terminal=false
+Type=Application
+Icon=dsh-tray-wails.exe
+Categories=Utility;
+StartupWMClass=dsh-tray-wails.exe
+
+ 

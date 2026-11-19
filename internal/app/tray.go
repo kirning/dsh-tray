@@ -1,0 +1,231 @@
+package app
+
+import (
+	"fmt"
+	"runtime"
+	"time"
+
+	"github.com/kirning/dsh-tray/internal/core"
+	"github.com/kirning/dsh-tray/internal/platform"
+	"github.com/wailsapp/wails/v3/pkg/application"
+)
+
+func platformName() string { return runtime.GOOS }
+
+// currentState 结合“进程是否存活”和“是否已就绪”得出三态。
+func currentState(d *core.Dsh) core.State {
+	if !d.IsRunning() {
+		d.ClearReady()
+		return core.StateStopped
+	}
+	if d.CheckReady() {
+		return core.StateRunning
+	}
+	return core.StateStarting
+}
+
+// Tray 管理托盘图标、右键菜单与 1 秒轮询。
+type Tray struct {
+	app  *application.App
+	tray *application.SystemTray
+	svc  *Service
+	dsh  *core.Dsh
+
+	actStart    *application.MenuItem
+	actRestart  *application.MenuItem
+	actOpen     *application.MenuItem
+	actLog      *application.MenuItem
+	actStop     *application.MenuItem
+	actUpdate   *application.MenuItem
+	actAuto     *application.MenuItem
+	actAutoOpen *application.MenuItem
+	actSettings *application.MenuItem
+	actExit     *application.MenuItem
+	actExitAll  *application.MenuItem
+	actVersion  *application.MenuItem
+
+	state core.State
+	frame int
+	done  chan struct{}
+}
+
+func NewTray(app *application.App, dsh *core.Dsh, svc *Service) *Tray {
+	return &Tray{app: app, dsh: dsh, svc: svc, done: make(chan struct{})}
+}
+
+// Start 建立菜单与图标，并启动轮询/动画。
+func (t *Tray) Start() {
+	t.tray = t.app.SystemTray.New()
+	t.tray.SetTooltip("dsh 托盘")
+
+	menu := application.NewMenu()
+
+	t.actStart = menu.Add("启动")
+	t.actStart.OnClick(func(*application.Context) { t.guard(t.svc.StartDsh) })
+
+	t.actRestart = menu.Add("重启")
+	t.actRestart.OnClick(func(*application.Context) { t.guard(t.svc.RestartDsh) })
+
+	t.actOpen = menu.Add("打开 web")
+	t.actOpen.OnClick(func(*application.Context) { t.guard(t.svc.OpenWeb) })
+
+	t.actLog = menu.Add("查看日志")
+	t.actLog.OnClick(func(*application.Context) { t.guard(t.svc.OpenLogFile) })
+
+	t.actStop = menu.Add("关闭")
+	t.actStop.OnClick(func(*application.Context) { t.guard(t.svc.StopDsh) })
+
+	menu.AddSeparator()
+
+	t.actUpdate = menu.Add("检查 dsh 更新")
+	t.actUpdate.OnClick(func(*application.Context) { go t.checkDshUpdate() })
+
+	t.actAuto = menu.AddCheckbox("开机自启", autostart())
+	t.actAuto.OnClick(func(*application.Context) {
+		_ = t.svc.SetAutostart(!autostart())
+		t.refresh(true)
+	})
+
+	t.actAutoOpen = menu.AddCheckbox("启动后自动打开 web", core.AutoOpenWeb())
+	t.actAutoOpen.OnClick(func(*application.Context) {
+		_ = core.UpdateConfig(func(c *core.Config) { c.AutoOpenWeb = !c.AutoOpenWeb })
+		t.actAutoOpen.SetChecked(core.AutoOpenWeb())
+		t.svc.notify()
+	})
+
+	t.actSettings = menu.Add("设置…")
+	t.actSettings.OnClick(func(*application.Context) { ShowSettings(t.app) })
+
+	menu.AddSeparator()
+
+	t.actExit = menu.Add("退出（dsh 继续运行）")
+	t.actExit.OnClick(func(*application.Context) { t.app.Quit() })
+
+	t.actExitAll = menu.Add("完全退出（同时关闭 dsh）")
+	t.actExitAll.OnClick(func(*application.Context) {
+		go func() {
+			_ = t.dsh.Stop()
+			t.app.Quit()
+		}()
+	})
+
+	menu.AddSeparator()
+	t.actVersion = menu.Add("版本 " + core.AppVersion + "（点击检查更新）")
+	t.actVersion.OnClick(func(*application.Context) {
+		ShowSettings(t.app)
+	})
+
+	t.tray.SetMenu(menu)
+	t.tray.OnDoubleClick(func() {
+		switch currentState(t.dsh) {
+		case core.StateStopped:
+			t.guard(t.svc.StartDsh)
+		case core.StateRunning:
+			t.guard(t.svc.OpenWeb)
+		}
+	})
+
+	t.refresh(true)
+	go t.loop()
+	go t.animate()
+}
+
+func autostart() bool {
+	return platform.AutostartEnabled()
+}
+
+func (t *Tray) guard(fn func() error) {
+	go func() {
+		if err := fn(); err != nil {
+			core.Logf("操作失败：%v", err)
+		}
+		t.refresh(true)
+	}()
+}
+
+// loop 每秒刷新状态与菜单可用性。
+func (t *Tray) loop() {
+	tk := time.NewTicker(time.Second)
+	defer tk.Stop()
+	for {
+		select {
+		case <-t.done:
+			return
+		case <-tk.C:
+			t.refresh(false)
+		}
+	}
+}
+
+// animate 在“启动中”状态交替两帧图标。
+func (t *Tray) animate() {
+	tk := time.NewTicker(420 * time.Millisecond)
+	defer tk.Stop()
+	for {
+		select {
+		case <-t.done:
+			return
+		case <-tk.C:
+			if t.state == core.StateStarting {
+				t.frame++
+				t.applyIcon()
+			}
+		}
+	}
+}
+
+func (t *Tray) refresh(force bool) {
+	s := currentState(t.dsh)
+	changed := s != t.state
+	t.state = s
+	if changed || force {
+		t.applyIcon()
+		t.applyMenu()
+	}
+}
+
+func (t *Tray) applyIcon() {
+	data, err := core.TrayIcon(t.state, t.frame)
+	if err != nil {
+		core.Logf("生成托盘图标失败：%v", err)
+		return
+	}
+	t.tray.SetIcon(data)
+	t.tray.SetTooltip(fmt.Sprintf("dsh 托盘 · %s", stateLabel(t.state)))
+}
+
+func stateLabel(s core.State) string {
+	switch s {
+	case core.StateRunning:
+		return "已就绪"
+	case core.StateStarting:
+		return "启动中"
+	default:
+		return "未运行"
+	}
+}
+
+func (t *Tray) applyMenu() {
+	t.actStart.SetEnabled(t.state == core.StateStopped)
+	t.actRestart.SetEnabled(true)
+	t.actOpen.SetEnabled(t.state == core.StateRunning)
+	t.actStop.SetEnabled(t.state != core.StateStopped)
+	t.actAuto.SetChecked(autostart())
+	t.actAutoOpen.SetChecked(core.AutoOpenWeb())
+	t.actVersion.SetLabel("版本 " + core.AppVersion + "（点击检查更新）")
+}
+
+// checkDshUpdate 查 npm 并在托盘里弹结果。
+func (t *Tray) checkDshUpdate() {
+	info, err := t.svc.CheckDshUpdate()
+	msg := ""
+	switch {
+	case err != nil:
+		msg = "检查更新失败：" + err.Error()
+	case info.HasUpdate:
+		msg = fmt.Sprintf("有新版本 %s（当前 %s）", info.Latest, info.Current)
+	default:
+		msg = fmt.Sprintf("已是最新版本 %s", info.Current)
+	}
+	t.app.Dialog.Info().SetTitle("检查 dsh 更新").SetMessage(msg).Show()
+}
