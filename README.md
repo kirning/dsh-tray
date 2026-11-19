@@ -51,15 +51,15 @@ dsh-tray-wails/
 ### Linux（CachyOS / Arch）
 
 ```bash
-sudo pacman -S --needed base-devel go nodejs npm \
-  gtk3 webkit2gtk-4.1 libayatana-appindicator
+sudo pacman -S --needed base-devel go nodejs npm pkgconf \
+  gtk4 webkitgtk-6.0 libayatana-appindicator
 ```
 
-- `webkit2gtk-4.1` 提供 WebView（缺了设置窗口打不开）
+- **Wails v3.1.0 的 Linux 后端默认是 GTK4 + WebKitGTK 6.0**（不是 GTK3 + WebKit 4.1）。
+  装错版本时 `go install wails3` 就会报 `Package gtk4 was not found` / `webkitgtk-6.0 not found`
 - `libayatana-appindicator` 提供托盘图标（GNOME 需装 AppIndicator 扩展才能看到）
-- GTK3 是 Wails Linux 后端的硬依赖
 
-Debian/Ubuntu 对应包名：`libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev`。
+Debian/Ubuntu 对应包名：`pkg-config libgtk-4-dev libwebkitgtk-6.0-dev libayatana-appindicator3-dev`。
 
 ## 构建与运行
 
