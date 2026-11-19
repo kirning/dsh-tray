@@ -20,15 +20,16 @@ jobs:
           - os: windows-latest
             asset: dsh-tray.exe
             built: bin/dsh-tray.exe
+            cgo: "0"
           - os: ubuntu-latest
             asset: dsh-tray-linux-amd64
             built: bin/dsh-tray
+            cgo: "1"
     runs-on: ${{ matrix.os }}
     env:
-      # Linux 侧 Wails 必须用 cgo 链接 GTK/WebKit，否则会报
-      # undefined: requires_CGO_ENABLED_1_or_build_tag_purego；
-      # Windows 侧用纯 Go 后端即可，保持 0 更省事。
-      CGO_ENABLED: ${{ runner.os == 'Windows' && '0' || '1' }}
+      # Linux 侧 Wails 要用 cgo 链接 GTK/WebKit，CGO_ENABLED=0 会报
+      # undefined requires_CGO_ENABLED_1_or_build_tag_purego；Windows 用纯 Go 后端即可。
+      CGO_ENABLED: ${{ matrix.cgo }}
     steps:
       - uses: actions/checkout@v4
 
