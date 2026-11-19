@@ -16,8 +16,9 @@ import (
 )
 
 // readyPortGrace 是“端口已监听但日志迟迟没有就绪标志”的兜底等待时间。
-// 用 --no-open 启动时 dsh 不打印就绪行，只能靠这个兜底。
-const readyPortGrace = 10 * time.Second
+// dsh 绑定端口后 HTTP 就能服务，所以不需要等太久；
+// 这个兜底主要覆盖 --no-open 不打印就绪行的场景。
+const readyPortGrace = 3 * time.Second
 
 // launch 描述“怎么启动一个 npm 全局命令”：
 //
@@ -197,14 +198,28 @@ func (d *Dsh) stopPid(pid int) error {
 	return fmt.Errorf("进程 %d 未能结束", pid)
 }
 
-// SetReadyBaseline 把就绪判定的日志起点定在当前文件末尾。
-// 用于程序刚启动、dsh 可能已经被外部启动的场景。
+// SetReadyBaseline 把就绪判定的日志起点定在当前文件末尾，并处理“dsh 已经在跑”的情况。
+//
+// 关键：如果此时端口已经监听，说明 dsh 是外部启动、早就在服务了。
+// 它的就绪行写在日志的历史位置（baseline 之前），日志扫描永远扫不到，
+// 只能靠端口兜底干等——图标会长时间停在橙色，看起来像“启动没成功”。
+// 所以这里直接判定就绪。
 func (d *Dsh) SetReadyBaseline() {
 	d.mu.Lock()
-	defer d.mu.Unlock()
 	d.ready = false
 	d.portSince = time.Time{}
 	d.readyOffset = FileSize(d.logPath)
+	port := d.port
+	d.mu.Unlock()
+
+	if port == 0 {
+		port = 3080
+	}
+	if portListening(port) {
+		d.mu.Lock()
+		d.ready = true
+		d.mu.Unlock()
+	}
 }
 
 // CheckReady 判断 dsh web 是否真正可用。
@@ -250,6 +265,14 @@ func (d *Dsh) ClearReady() {
 	d.ready = false
 	d.portSince = time.Time{}
 	d.mu.Unlock()
+}
+
+// DebugState 返回内部状态快照，供 --statustest 诊断就绪判定用。
+func (d *Dsh) DebugState() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return fmt.Sprintf("pid=%d ready=%v readyOffset=%d logSize=%d portSince=%v port=%d",
+		d.pid, d.ready, d.readyOffset, FileSize(d.logPath), d.portSince, d.port)
 }
 
 // portListening 用 TCP 连接探测端口是否在监听（跨平台，不依赖 netstat/ss）。

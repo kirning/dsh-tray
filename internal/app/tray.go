@@ -25,6 +25,9 @@ func currentState(d *core.Dsh) core.State {
 	return core.StateStarting
 }
 
+// CurrentState 导出给 main 的诊断参数使用。
+func CurrentState(d *core.Dsh) core.State { return currentState(d) }
+
 // Tray 管理托盘图标、右键菜单与 1 秒轮询。
 type Tray struct {
 	app  *application.App
@@ -192,8 +195,8 @@ func (t *Tray) applyIcon() {
 	state := t.state
 	upgrading := t.upgrading.Load()
 	if upgrading {
-		// 升级期间借用“启动中”的橙色两帧做进度提示，避免用户不知道还在不在跑
-		state = core.StateStarting
+		// 升级中用紫色角标的两帧动画，和“启动中”的橙色明确区分
+		state = core.StateUpgrading
 	}
 	data, err := core.TrayIcon(state, t.frame)
 	if err != nil {
@@ -213,6 +216,8 @@ func stateLabel(s core.State) string {
 		return "已就绪"
 	case core.StateStarting:
 		return "启动中"
+	case core.StateUpgrading:
+		return "升级中"
 	default:
 		return "未运行"
 	}

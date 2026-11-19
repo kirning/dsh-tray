@@ -29,6 +29,8 @@ var assets embed.FS
 
 func main() {
 	quitTest := false
+	statusTest := false
+	windowTest := false
 	for _, a := range os.Args[1:] {
 		switch a {
 		case "--version", "-v":
@@ -37,6 +39,12 @@ func main() {
 		case "--quittest":
 			// 自检：启动后 3 秒主动退出，用来验证退出链路（托盘菜单无法自动化点击）
 			quitTest = true
+		case "--statustest":
+			// 自检：每 2 秒把三态判定的内部状态写进日志，10 秒后退出
+			statusTest = true
+		case "--windowtest":
+			// 自检：关闭设置窗口，验证进程仍存活且窗口能重建
+			windowTest = true
 		}
 	}
 
@@ -70,6 +78,11 @@ func main() {
 		Mac: application.MacOptions{
 			ApplicationShouldTerminateAfterLastWindowClosed: false,
 		},
+		Windows: application.WindowsOptions{
+			// 关键：默认行为是“关掉最后一个窗口就 PostQuitMessage 退出”，
+			// 而我们是托盘程序，设置窗口只是附属面板。关掉它必须继续常驻。
+			DisableQuitOnLastWindowClosed: true,
+		},
 		// 关掉设置窗口不能退出程序；只有显式 Quit() 置位后才允许真正退出
 		ShouldQuit: app.ShouldQuit,
 	})
@@ -91,17 +104,7 @@ func main() {
 		app.Quit()
 	})
 
-	wailsApp.Window.NewWithOptions(application.WebviewWindowOptions{
-		Name:             app.SettingsWindowName,
-		Title:            "设置 - dsh 托盘",
-		Width:            860,
-		Height:           900,
-		MinWidth:         720,
-		MinHeight:        640,
-		Hidden:           true,
-		URL:              "/",
-		BackgroundColour: application.NewRGB(250, 249, 246),
-	})
+	app.EnsureSettingsWindow(wailsApp, true)
 
 	app.NewTray(wailsApp, dsh, svc).Start()
 
@@ -109,6 +112,38 @@ func main() {
 		go func() {
 			time.Sleep(3 * time.Second)
 			core.Logf("--quittest：主动退出（验证退出链路）")
+			app.Quit()
+		}()
+	}
+	if statusTest {
+		go func() {
+			for i := 0; i < 5; i++ {
+				time.Sleep(2 * time.Second)
+				core.Logf("statustest: state=%s running=%v ready=%v %s",
+					app.CurrentState(dsh), dsh.IsRunning(), dsh.CheckReady(), dsh.DebugState())
+			}
+			core.Logf("statustest 结束")
+			app.Quit()
+		}()
+	}
+	if windowTest {
+		go func() {
+			time.Sleep(3 * time.Second)
+			if w, ok := wailsApp.Window.GetByName(app.SettingsWindowName); ok {
+				w.Close()
+				core.Logf("windowtest: 已关闭设置窗口")
+			} else {
+				core.Logf("windowtest: 找不到设置窗口")
+			}
+			time.Sleep(3 * time.Second)
+			core.Logf("windowtest: 关闭 3 秒后进程仍存活，开始重建窗口")
+			app.ShowSettings(wailsApp)
+			time.Sleep(2 * time.Second)
+			if _, ok := wailsApp.Window.GetByName(app.SettingsWindowName); ok {
+				core.Logf("windowtest: 窗口重建成功")
+			} else {
+				core.Logf("windowtest: 窗口重建失败")
+			}
 			app.Quit()
 		}()
 	}

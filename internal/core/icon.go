@@ -17,19 +17,22 @@ import (
 //go:embed assets/running.png assets/stopped.png assets/starting-a.png assets/starting-b.png
 var iconAssets embed.FS
 
-// State 是托盘三态。
+// State 是托盘状态。
 type State string
 
 const (
-	StateStopped  State = "stopped"
+	StateStopped State = "stopped"
 	StateStarting State = "starting"
 	StateRunning  State = "running"
+	// StateUpgrading 升级中：复用“启动中”的两帧图，但角标用紫色，和启动的橙色区分开
+	StateUpgrading State = "upgrading"
 )
 
 var (
-	badgeRunning  = color.RGBA{0x2E, 0xA0, 0x43, 0xFF}
-	badgeStarting = color.RGBA{0xF0, 0x9D, 0x2E, 0xFF}
-	badgeStopped  = color.RGBA{0x8C, 0x8C, 0x8C, 0xFF}
+	badgeRunning   = color.RGBA{0x2E, 0xA0, 0x43, 0xFF} // 绿：已就绪
+	badgeStarting  = color.RGBA{0xF0, 0x9D, 0x2E, 0xFF} // 橙：启动中
+	badgeUpgrading = color.RGBA{0x7F, 0x77, 0xDD, 0xFF} // 紫：升级中
+	badgeStopped   = color.RGBA{0x8C, 0x8C, 0x8C, 0xFF} // 灰：未运行
 )
 
 func loadSprite(name string) (image.Image, error) {
@@ -124,12 +127,19 @@ func blendPixel(img *image.RGBA, x, y int, c color.RGBA, a float64) {
 }
 
 // TrayIcon 返回指定状态的托盘图标（PNG 字节，Wails 各平台都接受）。
-// frame 用于“启动中”的两帧动画：0 → starting-a，1 → starting-b。
+// frame 用于“启动中/升级中”的两帧动画：0 → starting-a，1 → starting-b。
 func TrayIcon(state State, frame int) ([]byte, error) {
 	sprite, badge := "stopped.png", badgeStopped
 	switch state {
 	case StateRunning:
 		sprite, badge = "running.png", badgeRunning
+	case StateUpgrading:
+		badge = badgeUpgrading
+		if frame%2 == 0 {
+			sprite = "starting-a.png"
+		} else {
+			sprite = "starting-b.png"
+		}
 	case StateStarting:
 		badge = badgeStarting
 		if frame%2 == 0 {
