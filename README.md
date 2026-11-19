@@ -72,6 +72,33 @@ go test ./...         # 纯逻辑测试
 Windows 构建会自动生成 `.syso`（清单 + 版本 + 图标）并用 `-H windowsgui` 去掉控制台。
 Linux 构建产物是动态链接的可执行文件，**运行时依赖上面那几个系统库**。
 
+### 发布
+
+三种方式，都会先跑 `go test ./internal/...` 再构建：
+
+**1. 打标签（正式发布）**
+
+```bash
+git tag v2.0.0 && git push origin v2.0.0
+```
+
+CI 会：构建 Windows + Linux → 创建 Release `v2.0.0` → 上传
+`dsh-tray.exe`、`dsh-tray-linux-amd64`、`checksums.txt`。
+标签里的版本号会被写进 `internal/core/selfupdate.go` 与 `build/config.yml`，
+所以包内 `--version` 与 Release 标签始终一致（自更新不会反复提示同一版本）。
+
+**2. 手动触发（草稿，适合先验证）**
+
+Actions → build → Run workflow → 填 `version`（如 `2.1.0`），`draft` 保持 `true`。
+产物进草稿 Release，**不影响 latest**；网页上确认无误后再点 Publish。
+
+**3. 只构建不发布**
+
+推 `main` / `wails-v2`，或手动触发时把 `version` 留空。
+
+> `workflow_dispatch` 只能从默认分支上存在的 workflow 触发；当前 workflow 位于
+> `wails-v2` 分支，所以手动触发需要先用标签跑通（或把 workflow 合并到 main）。
+
 ### 版本号
 
 当前 **2.0.0**，存在三处，改版本时必须同步：
