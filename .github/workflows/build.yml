@@ -51,7 +51,21 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev
 
       - name: Install Wails3
-        run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.1.0
+        shell: bash
+        run: |
+          if ! go install github.com/wailsapp/wails/v3/cmd/wails3@v3.1.0 > install-wails.log 2>&1; then
+            tail -n 40 install-wails.log
+            echo "::error::install-wails: $(tail -n 8 install-wails.log | tr '\n' '~' | cut -c1-900)"
+            exit 1
+          fi
+
+      - name: Upload install log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.asset }}
+          path: install-wails.log
+          if-no-files-found: ignore
 
       - name: Test core logic
         run: go test ./internal/...
