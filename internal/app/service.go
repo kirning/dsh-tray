@@ -277,6 +277,40 @@ func (s *Service) CheckDshUpdate() (UpdateInfo, error) {
 	return info, nil
 }
 
+// UpgradeDsh 把已安装的 dsh 升到指定版本。
+// 升级方式按实际安装渠道选择（mise / volta / npm），见 core.PlanDshUpgrade。
+//
+// 升级前会先停掉 dsh：Windows 上正在运行的进程会占用 node_modules 里的文件，
+// 不先停容易在覆盖时失败。原本在运行的，升级成功后自动拉起。
+func (s *Service) UpgradeDsh(version string) (string, error) {
+	wasRunning := s.dsh.IsRunning()
+	if wasRunning {
+		if err := s.dsh.Stop(); err != nil {
+			return "", fmt.Errorf("升级前停止 dsh 失败：%w", err)
+		}
+	}
+
+	out, err := core.UpgradeDsh(version)
+	s.invalidateVersion()
+	if err != nil {
+		if wasRunning {
+			_ = s.dsh.Start()
+		}
+		return core.TailText(out, 1200), err
+	}
+
+	msg := "已升级到 " + version
+	if wasRunning {
+		if e := s.dsh.Start(); e != nil {
+			msg += "；重启失败：" + e.Error()
+		} else {
+			msg += "，dsh 已重启"
+		}
+	}
+	s.notify()
+	return msg, nil
+}
+
 // CheckAppUpdate 查本程序的 GitHub Release。
 func (s *Service) CheckAppUpdate() (UpdateInfo, error) {
 	rel, route, err := core.LatestRelease()

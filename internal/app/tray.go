@@ -215,17 +215,45 @@ func (t *Tray) applyMenu() {
 	t.actVersion.SetLabel("版本 " + core.AppVersion + "（点击检查更新）")
 }
 
-// checkDshUpdate 查 npm 并在托盘里弹结果。
+// checkDshUpdate 查 npm；有新版本时弹框并带上「升级」按钮。
 func (t *Tray) checkDshUpdate() {
 	info, err := t.svc.CheckDshUpdate()
-	msg := ""
 	switch {
 	case err != nil:
-		msg = "检查更新失败：" + err.Error()
-	case info.HasUpdate:
-		msg = fmt.Sprintf("有新版本 %s（当前 %s）", info.Latest, info.Current)
+		t.app.Dialog.Error().SetTitle("检查 dsh 更新").
+			SetMessage("检查更新失败：\n" + err.Error()).Show()
+	case !info.HasUpdate:
+		t.app.Dialog.Info().SetTitle("检查 dsh 更新").
+			SetMessage(fmt.Sprintf("已是最新版本 %s", info.Current)).Show()
 	default:
-		msg = fmt.Sprintf("已是最新版本 %s", info.Current)
+		dlg := t.app.Dialog.Info().
+			SetTitle("检查 dsh 更新").
+			SetMessage(fmt.Sprintf(
+				"发现新版本 %s（当前 %s）。\n\n"+
+				"升级会先停止 dsh，再按当前安装方式执行全局安装命令，完成后自动重启（约 1~2 分钟）。",
+				info.Latest, info.Current))
+		upgrade := dlg.AddButton("升级到 " + info.Latest)
+		upgrade.OnClick(func() { go t.upgradeDsh(info.Latest) })
+		cancel := dlg.AddButton("稍后")
+		dlg.SetDefaultButton(upgrade)
+		dlg.SetCancelButton(cancel)
+		dlg.Show()
 	}
-	t.app.Dialog.Info().SetTitle("检查 dsh 更新").SetMessage(msg).Show()
+}
+
+// upgradeDsh 后台执行升级，完成后弹结果。
+// 必须放 goroutine：npm/mise 安装要几十秒到几分钟，不能卡住托盘消息循环。
+func (t *Tray) upgradeDsh(version string) {
+	t.tray.SetTooltip("dsh 托盘 · 正在升级到 " + version)
+	msg, err := t.svc.UpgradeDsh(version)
+	if err != nil {
+		detail := err.Error()
+		if msg != "" {
+			detail += "\n\n命令输出（末尾）：\n" + msg
+		}
+		t.app.Dialog.Error().SetTitle("升级 dsh 失败").SetMessage(detail).Show()
+	} else {
+		t.app.Dialog.Info().SetTitle("升级 dsh 完成").SetMessage(msg).Show()
+	}
+	t.refresh(true)
 }
