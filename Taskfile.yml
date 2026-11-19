@@ -9,7 +9,7 @@ vars:
   # by `wails3 build GOOS=...` (or the GOOS env var) for cross-compilation.
   GOOS: '{{.GOOS | default OS}}'
   # 程序版本：必须与 internal/core.AppVersion、build/config.yml 的 info.version 一致。
-  VERSION: "2.1.1"
+  VERSION: "2.2.0"
 
 # 只保留 Windows 与 Linux：本项目不支持 macOS / iOS / Android / Docker server。
 includes:

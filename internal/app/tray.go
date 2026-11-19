@@ -3,6 +3,7 @@ package app
 import (
 	"fmt"
 	"runtime"
+	"sync/atomic"
 	"time"
 
 	"github.com/kirning/dsh-tray/internal/core"
@@ -47,6 +48,9 @@ type Tray struct {
 	state core.State
 	frame int
 	done  chan struct{}
+
+	// upgrading 为 true 时托盘显示“进行中”动画，让用户知道升级还没结束
+	upgrading atomic.Bool
 }
 
 func NewTray(app *application.App, dsh *core.Dsh, svc *Service) *Tray {
@@ -166,7 +170,7 @@ func (t *Tray) animate() {
 		case <-t.done:
 			return
 		case <-tk.C:
-			if t.state == core.StateStarting {
+			if t.state == core.StateStarting || t.upgrading.Load() {
 				t.frame++
 				t.applyIcon()
 			}
@@ -185,13 +189,22 @@ func (t *Tray) refresh(force bool) {
 }
 
 func (t *Tray) applyIcon() {
-	data, err := core.TrayIcon(t.state, t.frame)
+	state := t.state
+	upgrading := t.upgrading.Load()
+	if upgrading {
+		// 升级期间借用“启动中”的橙色两帧做进度提示，避免用户不知道还在不在跑
+		state = core.StateStarting
+	}
+	data, err := core.TrayIcon(state, t.frame)
 	if err != nil {
 		core.Logf("生成托盘图标失败：%v", err)
 		return
 	}
 	t.tray.SetIcon(data)
-	t.tray.SetTooltip(fmt.Sprintf("dsh 托盘 · %s", stateLabel(t.state)))
+	// 升级时 tooltip 由 upgradeDsh 单独设置，这里不要覆盖
+	if !upgrading {
+		t.tray.SetTooltip(fmt.Sprintf("dsh 托盘 · %s", stateLabel(t.state)))
+	}
 }
 
 func stateLabel(s core.State) string {
@@ -213,6 +226,8 @@ func (t *Tray) applyMenu() {
 	t.actAuto.SetChecked(autostart())
 	t.actAutoOpen.SetChecked(core.AutoOpenWeb())
 	t.actVersion.SetLabel("版本 " + core.AppVersion + "（点击检查更新）")
+	// 升级过程中不允许再次触发检查/升级
+	t.actUpdate.SetEnabled(!t.upgrading.Load())
 }
 
 // checkDshUpdate 查 npm；有新版本时弹框并带上「升级」按钮。
@@ -226,15 +241,19 @@ func (t *Tray) checkDshUpdate() {
 		t.app.Dialog.Info().SetTitle("检查 dsh 更新").
 			SetMessage(fmt.Sprintf("已是最新版本 %s", info.Current)).Show()
 	default:
-		dlg := t.app.Dialog.Info().
+		// 必须用 Question 而不是 Info：Wails 在 Windows 上只有
+		// QuestionDialogType + 自定义按钮才会走 TaskDialog；
+		// Info 走 MessageBox，而 MessageBox 不支持自定义按钮文案（只会显示一个「确定」）。
+		dlg := t.app.Dialog.Question().
 			SetTitle("检查 dsh 更新").
 			SetMessage(fmt.Sprintf(
 				"发现新版本 %s（当前 %s）。\n\n"+
-				"升级会先停止 dsh，再按当前安装方式执行全局安装命令，完成后自动重启（约 1~2 分钟）。",
+					"升级会先停止 dsh，再按当前安装方式执行全局安装命令，完成后自动重启（约 1~2 分钟）。",
 				info.Latest, info.Current))
 		upgrade := dlg.AddButton("升级到 " + info.Latest)
 		upgrade.OnClick(func() { go t.upgradeDsh(info.Latest) })
-		cancel := dlg.AddButton("稍后")
+		cancel := dlg.AddButton("暂不升级")
+		cancel.OnClick(func() { core.Logf("用户选择暂不升级到 %s", info.Latest) })
 		dlg.SetDefaultButton(upgrade)
 		dlg.SetCancelButton(cancel)
 		dlg.Show()
@@ -244,7 +263,15 @@ func (t *Tray) checkDshUpdate() {
 // upgradeDsh 后台执行升级，完成后弹结果。
 // 必须放 goroutine：npm/mise 安装要几十秒到几分钟，不能卡住托盘消息循环。
 func (t *Tray) upgradeDsh(version string) {
-	t.tray.SetTooltip("dsh 托盘 · 正在升级到 " + version)
+	t.upgrading.Store(true)
+	t.tray.SetTooltip("dsh 托盘 · 正在升级到 " + version + "…")
+	t.applyIcon()
+	t.applyMenu()
+	defer func() {
+		t.upgrading.Store(false)
+		t.refresh(true)
+	}()
+
 	msg, err := t.svc.UpgradeDsh(version)
 	if err != nil {
 		detail := err.Error()
@@ -255,5 +282,4 @@ func (t *Tray) upgradeDsh(version string) {
 	} else {
 		t.app.Dialog.Info().SetTitle("升级 dsh 完成").SetMessage(msg).Show()
 	}
-	t.refresh(true)
 }
