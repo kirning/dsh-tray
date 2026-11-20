@@ -79,9 +79,14 @@ go test ./internal/...
 | 参数 | 作用 | 期望日志 |
 |---|---|---|
 | `--version` | 打印版本 | `2.x.y` |
+| `--autostart=on\|off` | 写/删系统自启项。**必须用这个，不要手写注册表**：路径含中文，脚本编码不对会写进乱码路径 | 无输出（GUI 子系统），用 `reg query HKCU\...\Run /v DshTray` 验证 |
 | `--quittest` | 3 秒后主动退出 | `--quittest：主动退出` → `程序退出`，进程消失 |
 | `--statustest` | 每 2 秒打印三态内部状态（含 `readyOffset`/`logSize`/`portSince`） | 状态应尽快变 `running` |
 | `--windowtest` | 关闭设置窗口 → 验证进程存活 → 重建窗口 | `关闭 3 秒后进程仍存活` → `窗口重建成功` |
+
+自启项位置：`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `DshTray`，
+值应为当前 exe 的绝对路径（带引号）。旧版 `app/dsh-tray` 用同名键，
+**切换到 Wails 版后必须用 `--autostart=on` 重写一次**，否则开机拉起的还是旧 exe。
 
 Linux 构建依赖 **GTK4 + WebKitGTK 6.0**（不是 GTK3 + WebKit 4.1）：
 

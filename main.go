@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/kirning/dsh-tray/internal/app"
@@ -32,6 +33,18 @@ func main() {
 	statusTest := false
 	windowTest := false
 	for _, a := range os.Args[1:] {
+		// --autostart=on|off：让程序自己写系统自启项。
+		// 必须由程序写而不是脚本写注册表：路径含中文，脚本编码不对会写成乱码路径。
+		if strings.HasPrefix(a, "--autostart=") {
+			v := strings.TrimPrefix(a, "--autostart=")
+			on := v != "off" && v != "false" && v != "0"
+			if err := platform.SetAutostart(on); err != nil {
+				fmt.Fprintln(os.Stderr, "设置开机自启失败:", err)
+				os.Exit(1)
+			}
+			fmt.Println("autostart =", v)
+			return
+		}
 		switch a {
 		case "--version", "-v":
 			fmt.Println(core.AppVersion)
