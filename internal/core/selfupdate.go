@@ -17,7 +17,7 @@ import (
 
 // AppVersion 是本程序（托盘自身）的版本，与被管理的 dsh 版本无关。
 // 用 var 便于构建时用 -ldflags "-X github.com/kirning/dsh-tray/internal/core.AppVersion=x.y.z" 覆盖。
-var AppVersion = "2.2.2"
+var AppVersion = "2.2.3"
 
 const (
 	repoOwner = "kirning"

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,10 +16,9 @@ import (
 	"github.com/kirning/dsh-tray/internal/platform"
 )
 
-// readyPortGrace 是“端口已监听但日志迟迟没有就绪标志”的兜底等待时间。
-// dsh 绑定端口后 HTTP 就能服务，所以不需要等太久；
-// 这个兜底主要覆盖 --no-open 不打印就绪行的场景。
-const readyPortGrace = 3 * time.Second
+// readyHTTPHits 是“外部实例”用 HTTP 探测判定就绪时需要连续命中的次数。
+// 只对拿不到日志的场景生效（见 CheckReady）。
+const readyHTTPHits = 2
 
 // launch 描述“怎么启动一个 npm 全局命令”：
 //
@@ -46,7 +46,7 @@ type Dsh struct {
 	logPath     string
 	ready       bool
 	readyOffset int64
-	portSince   time.Time
+	httpHits    int
 }
 
 func NewDsh(logPath string) *Dsh {
@@ -96,7 +96,7 @@ func (d *Dsh) StartWithArgs(args []string) error {
 
 	d.mu.Lock()
 	d.ready = false
-	d.portSince = time.Time{}
+	d.httpHits = 0
 	d.readyOffset = FileSize(d.logPath)
 	d.mu.Unlock()
 
@@ -184,7 +184,7 @@ func (d *Dsh) stopPid(pid int) error {
 	d.cmd = nil
 	d.pid = 0
 	d.ready = false
-	d.portSince = time.Time{}
+	d.httpHits = 0
 	d.mu.Unlock()
 
 	for i := 0; i < 50; i++ {
@@ -198,32 +198,25 @@ func (d *Dsh) stopPid(pid int) error {
 	return fmt.Errorf("进程 %d 未能结束", pid)
 }
 
-// SetReadyBaseline 把就绪判定的日志起点定在当前文件末尾，并处理“dsh 已经在跑”的情况。
+// SetReadyBaseline 把就绪判定的日志起点定在当前文件末尾。
 //
-// 关键：如果此时端口已经监听，说明 dsh 是外部启动、早就在服务了。
-// 它的就绪行写在日志的历史位置（baseline 之前），日志扫描永远扫不到，
-// 只能靠端口兜底干等——图标会长时间停在橙色，看起来像“启动没成功”。
-// 所以这里直接判定就绪。
+// 只设起点，**不再用“端口在监听”直接判就绪**：dsh 绑端口后还要加载插件与 MCP，
+// 那时访问并不通，提前变绿会误导。
 func (d *Dsh) SetReadyBaseline() {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.ready = false
-	d.portSince = time.Time{}
+	d.httpHits = 0
 	d.readyOffset = FileSize(d.logPath)
-	port := d.port
-	d.mu.Unlock()
-
-	if port == 0 {
-		port = 3080
-	}
-	if portListening(port) {
-		d.mu.Lock()
-		d.ready = true
-		d.mu.Unlock()
-	}
 }
 
 // CheckReady 判断 dsh web 是否真正可用。
-// 主判据是日志标志；兜底是端口监听满 readyPortGrace。
+//
+// 唯一可靠判据是日志里出现 "dsh web: http..."——dsh 加载完插件、绑定端口后打印的访问地址。
+// **明确不看“端口是否监听”**：端口先通、服务后好是常态，提前判绿会误导用户。
+//
+// 例外是“外部启动的实例”：它的 stdout 在别的终端里，我们拿不到那行日志，
+// 只能退化为 HTTP 探测（连续 readyHTTPHits 次拿到响应才算就绪），否则会永远停在橙色。
 func (d *Dsh) CheckReady() bool {
 	d.mu.Lock()
 	if d.ready {
@@ -231,24 +224,37 @@ func (d *Dsh) CheckReady() bool {
 		return true
 	}
 	offset := d.readyOffset
+	pid := d.pid
+	port := d.port
 	d.mu.Unlock()
 
-	ready := LogHasReadyMarker(d.logPath, offset)
-	if !ready && portListening(d.Port()) {
-		d.mu.Lock()
-		if d.portSince.IsZero() {
-			d.portSince = time.Now()
-		}
-		gracePassed := time.Since(d.portSince) >= readyPortGrace
-		d.mu.Unlock()
-		ready = gracePassed
-	}
-	if ready {
+	if LogHasReadyMarker(d.logPath, offset) {
 		d.mu.Lock()
 		d.ready = true
 		d.mu.Unlock()
+		return true
 	}
-	return ready
+
+	// 本程序启动的实例：日志里还没出现就绪行，就是还没好，继续等
+	if pid > 0 && platform.ProcessAlive(pid) {
+		return false
+	}
+
+	// 外部实例：没有日志可读，用 HTTP 探测兜底
+	if httpResponding(port) {
+		d.mu.Lock()
+		d.httpHits++
+		hits := d.httpHits
+		if hits >= readyHTTPHits {
+			d.ready = true
+		}
+		d.mu.Unlock()
+		return hits >= readyHTTPHits
+	}
+	d.mu.Lock()
+	d.httpHits = 0
+	d.mu.Unlock()
+	return false
 }
 
 // ReadyByLog 只按日志标志判断（自检用）。
@@ -263,7 +269,7 @@ func (d *Dsh) ReadyByLog() bool {
 func (d *Dsh) ClearReady() {
 	d.mu.Lock()
 	d.ready = false
-	d.portSince = time.Time{}
+	d.httpHits = 0
 	d.mu.Unlock()
 }
 
@@ -271,8 +277,23 @@ func (d *Dsh) ClearReady() {
 func (d *Dsh) DebugState() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return fmt.Sprintf("pid=%d ready=%v readyOffset=%d logSize=%d portSince=%v port=%d",
-		d.pid, d.ready, d.readyOffset, FileSize(d.logPath), d.portSince, d.port)
+	return fmt.Sprintf("pid=%d ready=%v readyOffset=%d logSize=%d httpHits=%d port=%d",
+		d.pid, d.ready, d.readyOffset, FileSize(d.logPath), d.httpHits, d.port)
+}
+
+// httpResponding 只用于“外部实例”的就绪探测：能拿到任意 HTTP 响应，
+// 说明 dsh 的 HTTP 服务已经在处理请求。1.5s 超时，避免 dsh 卡住时拖死轮询。
+func httpResponding(port int) bool {
+	if port == 0 {
+		port = 3080
+	}
+	client := &http.Client{Timeout: 1500 * time.Millisecond}
+	resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%d/", port))
+	if err != nil {
+		return false
+	}
+	_ = resp.Body.Close()
+	return true
 }
 
 // portListening 用 TCP 连接探测端口是否在监听（跨平台，不依赖 netstat/ss）。

@@ -62,7 +62,8 @@
 | 点「退出」无效，dsh 停了进程还在 | `windowsApp.destroy()` **首行** `if !shouldQuit() { return }`，而菜单直接调 `wailsApp.Quit()` 没置位 | 退出统一走 `app.Quit()`（先 `quitting.Store(true)` 再调注入的 Quit） |
 | 点设置窗口 X，整个程序退出 | `unregisterWindow` 发现窗口数为 0 就 `PostQuitMessage`，条件是 `!Windows.DisableQuitOnLastWindowClosed`，**绕过 ShouldQuit** | 置 `DisableQuitOnLastWindowClosed: true`，且 `ShowSettings` 要能重建被销毁的窗口 |
 | 带自定义按钮的弹框只剩一个「确定」 | `Info()` 走 MessageBox，不支持自定义按钮文案；只有 `Question` + 按钮才走 TaskDialog | 用 `app.Dialog.Question()`，再 `AddButton(...).OnClick(...)` |
-| dsh 已在跑，托盘一直橙色 | `SetReadyBaseline` 把扫描起点设在日志末尾，外部实例的就绪行在更早位置，永远扫不到，只能等端口兜底 | 端口已监听时直接判定就绪；兜底 3s |
+| dsh 已在跑，托盘一直橙色 | 外部实例的就绪行写在日志更早位置，甚至根本不在我们的日志里（stdout 在它的终端），扫不到就永远等不到 | 只认日志行；**外部实例**（`pid=0`）退化为 HTTP 探测，连续 2 次拿到响应才算就绪 |
+| **启动后过早变绿**（2.2.3 修） | 曾用“端口监听”当就绪信号。实测 `dsh web` 从绑端口到打印就绪行要 **~66 秒**（加载插件与 MCP），期间访问并不通 | **唯一判据是日志出现 `dsh web: http`**。`--starttest=3099` 可在独立端口复现整个过程 |
 
 ---
 
@@ -81,7 +82,8 @@ go test ./internal/...
 | `--version` | 打印版本 | `2.x.y` |
 | `--autostart=on\|off` | 写/删系统自启项。**必须用这个，不要手写注册表**：路径含中文，脚本编码不对会写进乱码路径 | 无输出（GUI 子系统），用 `reg query HKCU\...\Run /v DshTray` 验证 |
 | `--quittest` | 3 秒后主动退出 | `--quittest：主动退出` → `程序退出`，进程消失 |
-| `--statustest` | 每 2 秒打印三态内部状态（含 `readyOffset`/`logSize`/`portSince`） | 状态应尽快变 `running` |
+| `--statustest` | 每 2 秒打印三态内部状态（含 `readyOffset`/`logSize`/`httpHits`） | 状态应尽快变 `running` |
+| `--starttest=PORT` | 在指定端口起一个**独立 dsh 实例**（独立日志，不碰 3080），逐 2 秒采样直到就绪 | 应长时间 `starting`，直到日志出现 `dsh web: http` 才转 `running` |
 | `--windowtest` | 关闭设置窗口 → 验证进程存活 → 重建窗口 | `关闭 3 秒后进程仍存活` → `窗口重建成功` |
 
 自启项位置：`HKCU\Software\Microsoft\Windows\CurrentVersion\Run` 的 `DshTray`，

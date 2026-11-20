@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,7 +33,16 @@ func main() {
 	quitTest := false
 	statusTest := false
 	windowTest := false
+	startTestPort := 0
 	for _, a := range os.Args[1:] {
+		// --starttest=PORT：在指定端口起一个独立 dsh 实例，观察“什么时候变绿”。
+		// 用独立日志文件，避免清掉用户正在用的 3080 实例的日志。
+		if strings.HasPrefix(a, "--starttest=") {
+			if p, err := strconv.Atoi(strings.TrimPrefix(a, "--starttest=")); err == nil {
+				startTestPort = p
+			}
+			continue
+		}
 		// --autostart=on|off：让程序自己写系统自启项。
 		// 必须由程序写而不是脚本写注册表：路径含中文，脚本编码不对会写成乱码路径。
 		if strings.HasPrefix(a, "--autostart=") {
@@ -157,6 +167,36 @@ func main() {
 			} else {
 				core.Logf("windowtest: 窗口重建失败")
 			}
+			app.Quit()
+		}()
+	}
+
+	if startTestPort > 0 {
+		go func() {
+			testLog := filepath.Join(os.TempDir(), "dsh-tray-starttest.txt")
+			td := core.NewDsh(testLog)
+			td.SetPort(startTestPort)
+			args := []string{"web", "--no-open", "--port", strconv.Itoa(startTestPort)}
+			if err := td.StartWithArgs(args); err != nil {
+				core.Logf("starttest: 启动失败：%v", err)
+				app.Quit()
+				return
+			}
+			core.Logf("starttest: 已发起启动 port=%d，日志 %s", startTestPort, testLog)
+			for i := 1; i <= 90; i++ {
+				time.Sleep(2 * time.Second)
+				st := app.CurrentState(td)
+				core.Logf("starttest: t=%ds state=%s readyByLog=%v %s",
+					i*2, st, td.ReadyByLog(), td.DebugState())
+				if st == core.StateRunning {
+					core.Logf("starttest: 判定就绪，停止测试实例")
+					_ = td.StopTracked()
+					app.Quit()
+					return
+				}
+			}
+			core.Logf("starttest: 180 秒仍无就绪标志，停止测试实例")
+			_ = td.StopTracked()
 			app.Quit()
 		}()
 	}
